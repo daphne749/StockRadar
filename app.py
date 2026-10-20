@@ -648,4 +648,21 @@ with tab_tearsheet:
             c1.metric("目前報價", f"{current_price}")
             c2.metric("近四季 EPS", f"{eps}")
             c3, c4 = st.columns(2)
-            c3.metric("本益比 (PE)", f"{round(pe
+            c3.metric("本益比 (PE)", f"{round(pe, 2) if isinstance(pe, float) else pe}")
+            c4.metric("殖利率", f"{round(dividend, 2)}%" if isinstance(dividend, float) else "N/A")
+            
+            st.markdown("### 📋 業務概覽")
+            st.info(summary)
+            
+            st.markdown("### 📈 估值與價格位階")
+            st.write(f"- **52週高點 / 低點**：{high_52} / {low_52}")
+            st.write(f"- **遠期本益比 (Forward PE)**：{round(fwd_pe, 2) if isinstance(fwd_pe, float) else fwd_pe}")
+            
+            st.markdown("### 📰 近期市場關鍵字偵測")
+            news_html = fetch_news_text(ts_ticker, ".TW" in ts_ticker)
+            if any(k in news_html for k in ["創新高", "大增", "看好", "受惠"]): 
+                st.success("雷達偵測到近期包含「創新高、大增、看好」等正面關鍵字。")
+            elif any(k in news_html for k in ["衰退", "下修", "轉虧"]): 
+                st.error("雷達偵測到近期包含「衰退、下修」等保守關鍵字。")
+            else: 
+                st.write("近期新聞情緒平穩。")
