@@ -7,18 +7,37 @@ import os
 import requests
 import urllib.parse
 
-# === 1. 網頁全域設定與手機端按鈕優化 (移除隱藏工具列) ===
+# === 1. 網頁全域設定與手機端按鈕優化 ===
 st.set_page_config(page_title="專業波段選股系統", page_icon="📈", layout="wide")
 
-# 僅優化按鈕外觀，保留表格原生工具列
 st.markdown("""
 <style>
 .stButton>button {border-radius: 8px; font-weight: bold;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 雙引擎波段選股雷達 (手機優化版)")
+st.title("📈 雙引擎波段選股雷達")
 st.markdown("💰 **資金風控**：每單 30,000 TWD | 🎯 **核心策略**：20MA 回調買入 + 30% 停利 + 智慧情境監控")
+
+# === 內建台股中文名稱全自動動態字典 ===
+@st.cache_data(ttl=86400) 
+def get_all_tw_stock_names():
+    url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+    try:
+        res = requests.get(url, timeout=5).json()
+        if res.get("msg") == "success" and "data" in res:
+            df = pd.DataFrame(res["data"])
+            return dict(zip(df['stock_id'].astype(str), df['stock_name']))
+    except:
+        pass
+    return {
+        "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電", "2382": "廣達",
+        "2303": "聯電", "2881": "富邦金", "2891": "中信金", "2603": "長榮", "3231": "緯創",
+        "2345": "智邦", "2356": "英業達", "2376": "技嘉", "1519": "華城", "3017": "奇鋐",
+        "3324": "雙鴻", "1504": "東元", "1605": "華新", "2609": "陽明", "2618": "長榮航"
+    }
+
+TW_STOCK_NAMES = get_all_tw_stock_names()
 
 # === 2. 記憶體資料庫與 UI 狀態控制 ===
 DB_ALERTS = "user_alerts_config.json"
@@ -96,7 +115,7 @@ def get_finmind_chips(ticker, days=5):
         pass
     return {"外資近5日(張)": 0, "投信近5日(張)": 0, "狀態": "無資料/頻率限制"}
 
-# === 4. 整合分析引擎 (🚀 大幅優化 API 呼叫次數) ===
+# === 4. 整合分析引擎 ===
 @st.cache_data(ttl=1800)
 def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min_trust=0, filter_stealth=False):
     stock = yf.Ticker(ticker)
@@ -117,23 +136,18 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
     ma20 = latest["MA20"]
     ma60 = latest["MA60"]
 
-    is_long_uptrend = latest_price > ma60
-    near_support = (ma20 * 0.98) <= latest_price <= (ma20 * 1.05)
-    is_stealth = 0 < month_return <= 15
-    too_high = latest_price > (ma20 * 1.10)
+    if filter_stealth:
+        is_long_uptrend = latest_price > ma60
+        near_support = (ma20 * 0.98) <= latest_price <= (ma20 * 1.05)
+        is_stealth = 0 < month_return <= 15
+        if not (is_long_uptrend and is_stealth and near_support): 
+            return None
 
-    # 💡 核心優化：如果是在大範圍掃描，且技術面根本不符合買點，直接淘汰！
-    # 不要浪費免費額度去查它的籌碼跟估值
-    if filter_stealth and not (is_long_uptrend and is_stealth and near_support): 
-        return None
-
-    # --- 只有通過第一關 (技術面好)，才去抓容易被限制的資料 ---
     chips = get_finmind_chips(ticker) if is_tw else {"狀態": "不適用"}
     if is_tw:
         if chips.get("外資近5日(張)", 0) < min_foreign or chips.get("投信近5日(張)", 0) < min_trust:
             return None
 
-    # 用 try-except 保護 Yahoo Finance 抓取失敗
     try:
         info = stock.info
         trailing_eps = info.get("trailingEps", 0)
@@ -151,6 +165,11 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
 
     news_text = fetch_news_text(ticker, is_tw)
     future_topic = check_future_potential(news_text, eps_growth)
+    
+    is_long_uptrend = latest_price > ma60
+    near_support = (ma20 * 0.98) <= latest_price <= (ma20 * 1.05)
+    is_stealth = 0 < month_return <= 15
+    too_high = latest_price > (ma20 * 1.10)
 
     decision = ""
     if is_long_uptrend and is_stealth and near_support: decision = "🌟 隱藏多頭 (墊高+近支撐)"
@@ -161,9 +180,15 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
 
     affordable_shares = int(30000 // latest_price) if is_tw else round((30000 / 32) / latest_price, 2)
 
+    display_ticker = ticker.replace(".TW", "")
+    if is_tw:
+        stock_name = TW_STOCK_NAMES.get(display_ticker, "")
+        if stock_name:
+            display_ticker = f"{display_ticker} {stock_name}"
+
     return {
         "overview": {
-            "標的": ticker.replace(".TW", ""),
+            "標的": display_ticker,
             "收盤價": float(latest_price), 
             "單日漲跌(%)": float(pct_change),
             "近一月漲跌(%)": float(month_return) if not pd.isna(month_return) else 0.0,
@@ -175,7 +200,7 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
             "建議買進股數": affordable_shares
         },
         "eps_details": {
-            "標的": ticker.replace(".TW", ""),
+            "標的": display_ticker,
             "過去4季 EPS": round(trailing_eps, 2) if trailing_eps else "N/A",
             "明年預估 EPS": round(forward_eps, 2) if forward_eps else "N/A",
             "EPS 預估年增率": f"{round(eps_growth, 2)}%" if eps_growth else "N/A",
@@ -291,15 +316,15 @@ def color_us(val):
 
 # === 7. 介面呈現 (四大整合分頁) ===
 tab_tw, tab_us, tab_alerts, tab_tearsheet = st.tabs([
-    "🇹🇼 台股策略雷達", 
-    "🇺🇸 美股策略雷達", 
+    "🇹🇼 台股波段雷達", 
+    "🇺🇸 美股波段雷達", 
     "🔔 智慧趨勢提醒與健檢", 
     "📄 一鍵個股簡報"
 ])
 
-# ----------------- 分頁 1：台股策略雷達 -----------------
+# ----------------- 分頁 1：台股波段雷達 -----------------
 with tab_tw:
-    st.header("🇹🇼 台股多因子波段雷達")
+    st.header("🇹🇼 台股波段雷達")
     
     st.subheader("📌 自選觀察清單 (紅漲綠跌)")
     c_in, c_btn = st.columns([3, 1])
@@ -345,7 +370,7 @@ with tab_tw:
             with col_y:
                 if st.button("✅ 確認刪除", use_container_width=True, key="tw_del_yes"):
                     for t in del_list:
-                        tk_full = f"{t}.TW"
+                        tk_full = f"{t.split(' ')[0]}.TW"
                         if tk_full in st.session_state['watchlists']['TW']:
                             st.session_state['watchlists']['TW'].remove(tk_full)
                     save_json(DB_WATCHLISTS, st.session_state['watchlists'])
@@ -361,6 +386,19 @@ with tab_tw:
     st.markdown("---")
     st.subheader("🔍 市場動態掃描 (非主流・隱藏多頭・籌碼共振)")
     
+    # 策略說明展開區
+    with st.expander("💡 了解本系統的台股選股邏輯與策略"):
+        st.markdown("""
+        **本系統核心策略：20MA 回調買入法 + 多因子濾網**
+        這套雷達旨在幫您避開「追高被套」的風險，專門尋找**大趨勢保護下，剛好拉回支撐**的潛力股。
+
+        🔍 **動態掃描的篩選條件包含：**
+        1. **技術面 (隱藏多頭)**：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。
+        2. **籌碼面 (大人照顧)**：自動串接 FinMind，可透過下方滑桿自訂過濾出近期外資或投信正在偷偷佈局的股票。
+        3. **基本面 (估值評估)**：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。
+        4. **消息面 (未來潛力)**：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
+        """)
+
     col1, col2 = st.columns(2)
     with col1: max_price_tw = st.number_input("最高股價 (台幣)", value=150, step=10, key="max_tw")
     with col2: min_foreign = st.slider("外資近5日買超 > (張)", 0, 5000, 0, 500)
@@ -392,9 +430,9 @@ with tab_tw:
             else:
                 st.info("💡 今日掃描池中，沒有符合技術面買點的股票。")
 
-# ----------------- 分頁 2：美股策略雷達 -----------------
+# ----------------- 分頁 2：美股波段雷達 -----------------
 with tab_us:
-    st.header("🇺🇸 美股多因子波段雷達")
+    st.header("🇺🇸 美股波段雷達")
     
     st.subheader("📌 自選觀察清單 (綠漲紅跌)")
     c_in_us, c_btn_us = st.columns([3, 1])
@@ -455,6 +493,18 @@ with tab_us:
     st.markdown("---")
     st.subheader("🔍 市場動態掃描 (中小型・非熱門巨頭・隱藏多頭)")
     
+    # 策略說明展開區
+    with st.expander("💡 了解本系統的美股選股邏輯與策略"):
+        st.markdown("""
+        **本系統核心策略：20MA 回調買入法 + 基本面題材濾網**
+        這套雷達旨在幫您避開「追高被套」的風險，專門尋找**大趨勢保護下，剛好拉回支撐**的潛力美股。
+
+        🔍 **動態掃描的篩選條件包含：**
+        1. **技術面 (隱藏多頭)**：嚴格要求大趨勢偏多 (站上季線)，且近一個月漲幅溫和不透支 (0~15%)，目前價格剛好回調至 20 日線 (月線) 附近的安全邊際。
+        2. **基本面 (EPS與估值)**：自動為您換算遠期本益比，評估目前股價是便宜還是偏貴，並於詳細表格列出預估 EPS 成長率。
+        3. **消息面 (未來潛力)**：背景掃描最新外電新聞，偵測是否具備 AI、突破、升評 (upgrade) 等催化劑題材，發掘未來的潛力飆股。
+        """)
+
     col_u1, col_u2 = st.columns([1, 1])
     with col_u1: max_price_us = st.number_input("最高股價 (美元)", value=150, step=10, key="max_us")
     with col_u2: 
@@ -533,9 +583,13 @@ with tab_alerts:
                         note_text = alert_data.get('個人筆記', '')
                         note_html = f"<i style='color: #bbb;'>{note_text}</i>" if note_text else "<i style='color: #666;'>無</i>"
 
+                        display_ticker_alert = ticker.replace(".TW", "")
+                        if ".TW" in ticker and display_ticker_alert in TW_STOCK_NAMES:
+                            display_ticker_alert = f"{display_ticker_alert} {TW_STOCK_NAMES[display_ticker_alert]}"
+
                         st.markdown(f"""
                         <div style="border-left: 5px solid {border_color}; padding: 15px; background-color: #1e1e1e; border-radius: 8px; margin-bottom: 20px;">
-                            <h4 style="margin-top: 0; color: {border_color};">{ticker} - {alert_data['目前階段']}</h4>
+                            <h4 style="margin-top: 0; color: {border_color};">{display_ticker_alert} - {alert_data['目前階段']}</h4>
                             {custom_html}
                             <ul style="margin-top: 10px; margin-bottom: 10px; padding-left: 20px;">
                                 <li><b>發生什麼事：</b>{alert_data['發生什麼事']}</li>
@@ -569,7 +623,13 @@ with tab_tearsheet:
         with st.spinner("彙整全球資料庫中..."):
             stock = yf.Ticker(ts_ticker.upper())
             info = stock.info
-            name = info.get("longName", info.get("shortName", ts_ticker))
+            
+            base_ticker = ts_ticker.upper().replace(".TW", "")
+            if ".TW" in ts_ticker.upper() and base_ticker in TW_STOCK_NAMES:
+                name = TW_STOCK_NAMES[base_ticker]
+            else:
+                name = info.get("longName", info.get("shortName", ts_ticker))
+                
             sector = info.get("sector", "無資料")
             industry = info.get("industry", "無資料")
             summary = info.get("longBusinessSummary", "暫無業務簡介資料。")
@@ -588,21 +648,4 @@ with tab_tearsheet:
             c1.metric("目前報價", f"{current_price}")
             c2.metric("近四季 EPS", f"{eps}")
             c3, c4 = st.columns(2)
-            c3.metric("本益比 (PE)", f"{round(pe, 2) if isinstance(pe, float) else pe}")
-            c4.metric("殖利率", f"{round(dividend, 2)}%" if isinstance(dividend, float) else "N/A")
-            
-            st.markdown("### 📋 業務概覽")
-            st.info(summary)
-            
-            st.markdown("### 📈 估值與價格位階")
-            st.write(f"- **52週高點 / 低點**：{high_52} / {low_52}")
-            st.write(f"- **遠期本益比 (Forward PE)**：{round(fwd_pe, 2) if isinstance(fwd_pe, float) else fwd_pe}")
-            
-            st.markdown("### 📰 近期市場關鍵字偵測")
-            news_html = fetch_news_text(ts_ticker, ".TW" in ts_ticker)
-            if any(k in news_html for k in ["創新高", "大增", "看好", "受惠"]): 
-                st.success("雷達偵測到近期包含「創新高、大增、看好」等正面關鍵字。")
-            elif any(k in news_html for k in ["衰退", "下修", "轉虧"]): 
-                st.error("雷達偵測到近期包含「衰退、下修」等保守關鍵字。")
-            else: 
-                st.write("近期新聞情緒平穩。")
+            c3.metric("本益比 (PE)", f"{round(pe
