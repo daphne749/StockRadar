@@ -6,8 +6,6 @@ import json
 import os
 import requests
 import urllib.parse
-import socket
-import urllib3.util.connection as urllib3_cn
 
 # === 1. 網頁全域設定與手機端按鈕優化 ===
 st.set_page_config(page_title="專業波段選股系統", page_icon="📈", layout="wide")
@@ -21,7 +19,7 @@ st.markdown("""
 st.title("📈 雙引擎波段選股雷達")
 st.markdown("💰 **資金風控**：每單 30,000 TWD | 🎯 **核心策略**：20MA 回調買入 + 30% 停利 + 智慧情境監控")
 
-# === Telegram 推播核心模組 (強制 IPv4 穩定通道 + 自動重試) ===
+# === Telegram 推播核心模組 (支援 Google Apps Script 中繼通道) ===
 def get_tg_credentials():
     token = st.session_state.get("custom_tg_token", "")
     chat_id = st.session_state.get("custom_tg_chat_id", "")
@@ -37,34 +35,39 @@ def get_tg_credentials():
             chat_id = ""
     return token.strip(), chat_id.strip()
 
+def get_tg_proxy_url():
+    try:
+        return str(st.secrets.get("TG_PROXY_URL", "")).strip()
+    except Exception:
+        return ""
+
 def send_telegram_msg(text):
     token, chat_id = get_tg_credentials()
     if not token or not chat_id:
         return False, "尚未設定 TG_BOT_TOKEN 或 TG_CHAT_ID"
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML"
-    }
-    orig_family = urllib3_cn.allowed_gai_family
-    urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+    
+    proxy_url = get_tg_proxy_url()
+    
     try:
-        for attempt in range(2):
-            try:
-                res = requests.post(url, json=payload, timeout=25)
-                data = res.json()
-                if res.status_code == 200 and data.get("ok"):
-                    return True, "推播成功"
-                return False, f"Telegram 拒絕發送：{data.get('description', '未知錯誤')}"
-            except requests.exceptions.Timeout:
-                if attempt == 0:
-                    continue
-                return False, "連線逾時（已自動重試 2 次），請稍後再按一次測試"
-            except Exception as e:
-                return False, f"連線異常：{e}"
-    finally:
-        urllib3_cn.allowed_gai_family = orig_family
+        if proxy_url:
+            res = requests.post(
+                proxy_url,
+                json={"token": token, "chat_id": chat_id, "text": text},
+                timeout=25
+            )
+        else:
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            res = requests.post(
+                url,
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+                timeout=25
+            )
+        data = res.json()
+        if res.status_code == 200 and data.get("ok"):
+            return True, "推播成功"
+        return False, f"Telegram 拒絕發送：{data.get('description', '未知錯誤')}"
+    except Exception as e:
+        return False, f"連線異常：{e}"
 
 # === 內建台股中文名稱全自動動態字典 ===
 @st.cache_data(ttl=86400) 
@@ -838,8 +841,10 @@ with tab_alerts:
     # Telegram 設定與測試區塊
     with st.expander("📲 Telegram 自動推播連線設定與測試", expanded=True):
         cur_token, cur_chat_id = get_tg_credentials()
+        cur_proxy = get_tg_proxy_url()
         if cur_token and cur_chat_id:
-            st.success(f"✅ 已讀取 Telegram 連線設定 (Chat ID: `{cur_chat_id}`)")
+            proxy_status = "（已啟用 Google 中繼通道）" if cur_proxy else "（直連模式）"
+            st.success(f"✅ 已讀取 Telegram 連線設定 (Chat ID: `{cur_chat_id}`) {proxy_status}")
         else:
             st.warning("⚠️ 尚未讀取到 Secrets 設定，請確認已於 Streamlit Cloud Settings -> Secrets 儲存，或於下方暫時輸入測試。")
         
