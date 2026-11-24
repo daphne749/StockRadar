@@ -19,6 +19,41 @@ st.markdown("""
 st.title("📈 雙引擎波段選股雷達")
 st.markdown("💰 **資金風控**：每單 30,000 TWD | 🎯 **核心策略**：20MA 回調買入 + 30% 停利 + 智慧情境監控")
 
+# === Telegram 推播核心模組 ===
+def get_tg_credentials():
+    token = st.session_state.get("custom_tg_token", "")
+    chat_id = st.session_state.get("custom_tg_chat_id", "")
+    if not token:
+        try:
+            token = st.secrets.get("TG_BOT_TOKEN", "")
+        except Exception:
+            token = ""
+    if not chat_id:
+        try:
+            chat_id = str(st.secrets.get("TG_CHAT_ID", ""))
+        except Exception:
+            chat_id = ""
+    return token.strip(), chat_id.strip()
+
+def send_telegram_msg(text):
+    token, chat_id = get_tg_credentials()
+    if not token or not chat_id:
+        return False, "尚未設定 TG_BOT_TOKEN 或 TG_CHAT_ID"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        data = res.json()
+        if res.status_code == 200 and data.get("ok"):
+            return True, "推播成功"
+        return False, f"Telegram 拒絕發送：{data.get('description', '未知錯誤')}"
+    except Exception as e:
+        return False, f"連線異常：{e}"
+
 # === 內建台股中文名稱全自動動態字典 ===
 @st.cache_data(ttl=86400) 
 def get_all_tw_stock_names():
@@ -116,8 +151,8 @@ def get_finmind_chips(ticker, days=5):
         pass
     return {"外資近5日(張)": 0, "投信近5日(張)": 0, "狀態": "無資料/頻率限制"}
 
-# === 3.5 新增：AI 基本面深度篩選與研究助理模組 ===
-@st.cache_data(ttl=43200) # 快取 12 小時，確保每次開啟秒開
+# === 3.5 AI 基本面深度篩選與研究助理模組 ===
+@st.cache_data(ttl=43200)
 def get_tw_monthly_revenue(stock_id):
     start_date = (datetime.date.today() - datetime.timedelta(days=450)).strftime("%Y-%m-%d")
     url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={stock_id}&start_date={start_date}"
@@ -130,7 +165,6 @@ def get_tw_monthly_revenue(stock_id):
             yoy = latest.get("revenue_year_growth", None)
             year_month = f"{latest.get('revenue_year')}年{latest.get('revenue_month')}月"
             
-            # 若 API 未直接提供年增率，則手動比對去年同月
             if yoy is None and len(df) >= 13:
                 prev_year_rev = df.iloc[-13].get("revenue", 0)
                 if prev_year_rev > 0:
@@ -183,11 +217,9 @@ def screen_fundamental_stocks(is_tw=True):
                 yoy_val = round(rev_growth_yf * 100, 2) if rev_growth_yf is not None else 0
                 source_str = "Yahoo Finance (SEC 季報/年報 TTM 數據)"
             
-            # 嚴格基本面篩選標準：近四季 EPS > 0、營收正成長、營業利益率 > 10% (完全不看股價漲跌)
             if eps_ttm and eps_ttm > 0 and yoy_val and yoy_val > 5 and op_pct and op_pct > 10:
                 news_text = fetch_news_text(ticker, is_tw)
                 
-                # 剖析成長原因
                 reasons = []
                 if yoy_val > 20: reasons.append(f"營收年增率高達 {yoy_val}%，展現強勁的市場需求與出貨動能")
                 else: reasons.append(f"營收年增率維持 {yoy_val}% 穩健成長")
@@ -196,7 +228,6 @@ def screen_fundamental_stocks(is_tw=True):
                 if "AI" in news_text or "伺服器" in news_text or "晶片" in news_text:
                     reasons.append("近期市場新聞指出公司受惠於 AI 算力、雲端基建或先進製程規格升級趨勢")
                 
-                # 剖析潛在風險
                 risks = []
                 if dte_val and dte_val > 100:
                     risks.append(f"負債權益比 (Debt/Equity) 達 {dte_val}%，財務槓桿偏高，需留意高利率環境下的利息負擔")
@@ -211,7 +242,6 @@ def screen_fundamental_stocks(is_tw=True):
                 if is_tw:
                     risks.append("外銷導向產業需持續留意新台幣匯率波動對毛利率的潛在侵蝕")
 
-                # 還要確認的資訊
                 checks = [
                     "下一次法說會或財報會議中，管理層對下一季毛利率與資本支出的最新指引 (Guidance)。",
                     "營收成長是否來自實質終端需求擴大，而非客戶端短期提前拉貨（需交叉比對存貨週轉天數變化）。",
@@ -480,15 +510,31 @@ with tab_ai_rec:
     with st.expander("🔑 進階設定：連結 Gemini API 啟動深度 AI 推理（選填）"):
         gemini_key = st.text_input("輸入 Gemini API Key（留空則使用系統內建量化研究報告）", type="password")
 
-    col_r1, col_r2 = st.columns([4, 1])
-    with col_r2:
-        if st.button("🔄 強制重新抓取", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-
     with st.spinner("研究助理正在調閱台美股最新財報、月營收與負債數據..."):
         tw_picks = screen_fundamental_stocks(is_tw=True)
         us_picks = screen_fundamental_stocks(is_tw=False)
+
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        if st.button("🔄 強制重新抓取最新財報", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+    with col_r2:
+        if st.button("📲 將今日潛力股推播至 Telegram", use_container_width=True):
+            msg_lines = [f"<b>🤖 AI 基本面潛力股日報 ({datetime.date.today()})</b>\n"]
+            if tw_picks:
+                msg_lines.append("<b>🇹🇼 台股篩選名單：</b>")
+                for item in tw_picks:
+                    msg_lines.append(f"• <b>{item['ticker']} {item['name']}</b>：年增 {item['yoy']}｜EPS {item['eps_ttm']}｜毛利 {item['gm']}｜營益 {item['opm']}")
+            if us_picks:
+                msg_lines.append("\n<b>🇺🇸 美股篩選名單：</b>")
+                for item in us_picks:
+                    msg_lines.append(f"• <b>{item['ticker']} ({item['name']})</b>：年增 {item['yoy']}｜EPS ${item['eps_ttm']}｜毛利 {item['gm']}｜營益 {item['opm']}")
+            if not tw_picks and not us_picks:
+                msg_lines.append("今日暫無符合嚴格基本面條件之標的。")
+            ok, status_msg = send_telegram_msg("\n".join(msg_lines))
+            if ok: st.success("✅ 已成功推播至您的 Telegram！")
+            else: st.error(f"❌ {status_msg}")
 
     st.subheader("🇹🇼 台股基本面潛力研究名單")
     if gemini_key and tw_picks:
@@ -654,6 +700,12 @@ with tab_tw:
                 )
                 with st.expander("📊 點擊展開 EPS 獲利分析表"):
                     st.table(pd.DataFrame(eps_res))
+                
+                tg_lines = [f"<b>🇹🇼 台股波段雷達掃描結果 ({datetime.date.today()})</b>\n"]
+                for r in scan_res:
+                    tg_lines.append(f"• <b>{r['標的']}</b>｜現價 {r['收盤價']:.2f}｜{r['綜合決策']}｜停損 {r['防守停損']:.2f} / 停利 {r['停利目標']:.2f}")
+                ok, s_msg = send_telegram_msg("\n".join(tg_lines))
+                if ok: st.toast("📲 已同步推播台股掃描結果至 Telegram！")
             else:
                 st.info("💡 今日掃描池中，沒有符合技術面買點的股票。")
 
@@ -757,14 +809,41 @@ with tab_us:
                 )
                 with st.expander("📊 點擊展開 EPS 獲利分析表"):
                     st.table(pd.DataFrame(eps_res_us))
+                
+                tg_lines_us = [f"<b>🇺🇸 美股波段雷達掃描結果 ({datetime.date.today()})</b>\n"]
+                for r in scan_res_us:
+                    tg_lines_us.append(f"• <b>{r['標的']}</b>｜現價 ${r['收盤價']:.2f}｜{r['綜合決策']}｜停損 ${r['防守停損']:.2f} / 停利 ${r['停利目標']:.2f}")
+                ok, s_msg = send_telegram_msg("\n".join(tg_lines_us))
+                if ok: st.toast("📲 已同步推播美股掃描結果至 Telegram！")
             else:
                 st.info("💡 今日市場無符合條件的標的。")
 
 # ----------------- 分頁 3：智慧趨勢提醒與健檢 -----------------
 with tab_alerts:
     st.header("🧠 情境式智慧趨勢監控與持股健檢")
-    st.markdown("設定專屬監控標的，系統會在技術面達標、或到達特定日期/價格時跳出具體行動建議。")
+    st.markdown("設定專屬監控標的，系統會在技術面達標、或到達特定日期/價格時跳出具體行動建議並同步推播至 Telegram。")
     
+    # Telegram 設定與測試區塊
+    with st.expander("📲 Telegram 自動推播連線設定與測試", expanded=True):
+        cur_token, cur_chat_id = get_tg_credentials()
+        if cur_token and cur_chat_id:
+            st.success(f"✅ 已讀取 Telegram 連線設定 (Chat ID: `{cur_chat_id}`)")
+        else:
+            st.warning("⚠️ 尚未讀取到 Secrets 設定，請確認已於 Streamlit Cloud Settings -> Secrets 儲存，或於下方暫時輸入測試。")
+        
+        c_tg1, c_tg2 = st.columns(2)
+        with c_tg1:
+            in_token = st.text_input("Bot Token (若已設 Secrets 可留空)", type="password", key="tg_tk_in")
+            if in_token: st.session_state["custom_tg_token"] = in_token
+        with c_tg2:
+            in_cid = st.text_input("Chat ID (若已設 Secrets 可留空)", key="tg_cid_in")
+            if in_cid: st.session_state["custom_tg_chat_id"] = in_cid
+            
+        if st.button("📨 發送 Telegram 測試訊息", use_container_width=True):
+            ok, msg = send_telegram_msg("🔔 <b>波段選股雷達連線測試成功！</b>\n您的智慧趨勢提醒與策略掃描訊號已準備就緒。")
+            if ok: st.success("✅ 測試訊息已發送！請查看您的手機 Telegram。")
+            else: st.error(f"❌ 發送失敗：{msg}")
+
     st.markdown("""
     <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
         <span style="font-size: 1.1em; font-weight: bold; color: #ffc107;">🧠 智慧趨勢情境條件說明與標準</span><br>
@@ -814,9 +893,11 @@ with tab_alerts:
     if not config: 
         st.info("目前沒有監控中的標的。請從上方新增設定。")
     else:
+        auto_push_tg = st.checkbox("📲 掃描觸發警報時自動推播至 Telegram", value=True)
         if st.button("🔄 立即執行全盤掃描與健檢", type="primary", use_container_width=True):
             with st.spinner("正在進行多面向情境診斷..."):
                 alerts_found = 0
+                tg_alert_messages = []
                 for ticker, settings in config.items():
                     alert_data = generate_smart_alert(ticker, settings)
                     
@@ -825,9 +906,11 @@ with tab_alerts:
                         border_color = "#ff4b4b" if "風險" in alert_data["目前階段"] else "#00cc96" if "確認" in alert_data["目前階段"] else "#ffc107"
                         
                         custom_html = ""
+                        custom_tg = ""
                         if alert_data.get("自訂觸發項目"):
                             for msg in alert_data["自訂觸發項目"]:
                                 custom_html += f"<div style='color: #ffc107; font-weight: bold; margin-bottom: 5px;'>{msg}</div>"
+                                custom_tg += f"\n{msg.replace('**', '')}"
                                 
                         note_text = alert_data.get('個人筆記', '')
                         note_html = f"<i style='color: #bbb;'>{note_text}</i>" if note_text else "<i style='color: #666;'>無</i>"
@@ -835,6 +918,15 @@ with tab_alerts:
                         display_ticker_alert = ticker.replace(".TW", "")
                         if ".TW" in ticker and display_ticker_alert in TW_STOCK_NAMES:
                             display_ticker_alert = f"{display_ticker_alert} {TW_STOCK_NAMES[display_ticker_alert]}"
+
+                        tg_block = (
+                            f"<b>🚨 {display_ticker_alert} - {alert_data['目前階段']}</b>{custom_tg}\n"
+                            f"• <b>發生什麼事：</b>{alert_data['發生什麼事']}\n"
+                            f"• <b>🎯 建議下一步：</b>{alert_data['建議下一步']}\n"
+                            f"• <b>⚠️ 失效條件：</b>{alert_data['失效條件']}\n"
+                            f"• <b>📝 決策筆記：</b>{note_text if note_text else '無'}"
+                        )
+                        tg_alert_messages.append(tg_block)
 
                         st.markdown(f"""
                         <div style="border-left: 5px solid {border_color}; padding: 15px; background-color: #1e1e1e; border-radius: 8px; margin-bottom: 20px;">
@@ -856,6 +948,11 @@ with tab_alerts:
                         
                 if alerts_found == 0: 
                     st.success("✅ 掃描完畢。您監控的股票走勢符合預期，且未達自訂觸發條件。")
+                elif auto_push_tg and tg_alert_messages:
+                    full_tg_text = f"<b>🔔 智慧趨勢監控警報 ({datetime.date.today()})</b>\n\n" + "\n\n━━━━━━━━━━\n\n".join(tg_alert_messages)
+                    ok, msg = send_telegram_msg(full_tg_text)
+                    if ok: st.success("📲 已自動將上述觸發警報推播至您的 Telegram！")
+                    else: st.warning(f"⚠️ Telegram 自動推播未完成：{msg}")
 
 # ----------------- 分頁 4：一鍵個股簡報 -----------------
 with tab_tearsheet:
