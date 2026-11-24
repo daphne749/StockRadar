@@ -34,7 +34,8 @@ def get_all_tw_stock_names():
         "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電", "2382": "廣達",
         "2303": "聯電", "2881": "富邦金", "2891": "中信金", "2603": "長榮", "3231": "緯創",
         "2345": "智邦", "2356": "英業達", "2376": "技嘉", "1519": "華城", "3017": "奇鋐",
-        "3324": "雙鴻", "1504": "東元", "1605": "華新", "2609": "陽明", "2618": "長榮航"
+        "3324": "雙鴻", "1504": "東元", "1605": "華新", "2609": "陽明", "2618": "長榮航",
+        "2368": "金像電", "2449": "京元電子", "3661": "世芯-KY", "3443": "創意"
     }
 
 TW_STOCK_NAMES = get_all_tw_stock_names()
@@ -114,6 +115,146 @@ def get_finmind_chips(ticker, days=5):
     except:
         pass
     return {"外資近5日(張)": 0, "投信近5日(張)": 0, "狀態": "無資料/頻率限制"}
+
+# === 3.5 新增：AI 基本面深度篩選與研究助理模組 ===
+@st.cache_data(ttl=43200) # 快取 12 小時，確保每次開啟秒開
+def get_tw_monthly_revenue(stock_id):
+    start_date = (datetime.date.today() - datetime.timedelta(days=450)).strftime("%Y-%m-%d")
+    url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockMonthRevenue&data_id={stock_id}&start_date={start_date}"
+    try:
+        res = requests.get(url, timeout=5).json()
+        if res.get("msg") == "success" and len(res.get("data", [])) > 0:
+            df = pd.DataFrame(res["data"])
+            latest = df.iloc[-1]
+            rev = latest.get("revenue", 0)
+            yoy = latest.get("revenue_year_growth", None)
+            year_month = f"{latest.get('revenue_year')}年{latest.get('revenue_month')}月"
+            
+            # 若 API 未直接提供年增率，則手動比對去年同月
+            if yoy is None and len(df) >= 13:
+                prev_year_rev = df.iloc[-13].get("revenue", 0)
+                if prev_year_rev > 0:
+                    yoy = ((rev - prev_year_rev) / prev_year_rev) * 100
+            return {
+                "最新期別": year_month,
+                "月營收(億)": round(rev / 1e8, 2),
+                "營收年增率(%)": round(yoy, 2) if yoy is not None else None
+            }
+    except:
+        pass
+    return None
+
+@st.cache_data(ttl=43200)
+def screen_fundamental_stocks(is_tw=True):
+    pool = ["2330.TW", "2454.TW", "2308.TW", "2382.TW", "3017.TW", "1519.TW", "2345.TW", "2368.TW", "3324.TW", "2449.TW"] if is_tw else ["NVDA", "MSFT", "AAPL", "GOOGL", "AMZN", "META", "AMD", "AVGO", "VRT", "PLTR", "CRWD"]
+    results = []
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    
+    for ticker in pool:
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            
+            eps_ttm = info.get("trailingEps", None)
+            gross_margin = info.get("grossMargins", None)
+            op_margin = info.get("operatingMargins", None)
+            debt_to_equity = info.get("debtToEquity", None)
+            rev_growth_yf = info.get("revenueGrowth", None)
+            
+            gm_pct = round(gross_margin * 100, 2) if gross_margin is not None else None
+            op_pct = round(op_margin * 100, 2) if op_margin is not None else None
+            dte_val = round(debt_to_equity, 2) if debt_to_equity is not None else None
+            
+            stock_id = ticker.replace(".TW", "")
+            if is_tw:
+                name = TW_STOCK_NAMES.get(stock_id, info.get("shortName", stock_id))
+                rev_data = get_tw_monthly_revenue(stock_id)
+                if rev_data and rev_data["營收年增率(%)"] is not None:
+                    rev_str = f"{rev_data['月營收(億)']} 億台幣 ({rev_data['最新期別']})"
+                    yoy_val = rev_data["營收年增率(%)"]
+                    source_str = "FinMind (月營收) / Yahoo Finance (財報指標)"
+                else:
+                    rev_str = "依最新季報"
+                    yoy_val = round(rev_growth_yf * 100, 2) if rev_growth_yf is not None else 0
+                    source_str = "Yahoo Finance (季報與TTM數據)"
+            else:
+                name = info.get("shortName", ticker)
+                rev_str = "依最新季報 (美股無月營收制度)"
+                yoy_val = round(rev_growth_yf * 100, 2) if rev_growth_yf is not None else 0
+                source_str = "Yahoo Finance (SEC 季報/年報 TTM 數據)"
+            
+            # 嚴格基本面篩選標準：近四季 EPS > 0、營收正成長、營業利益率 > 10% (完全不看股價漲跌)
+            if eps_ttm and eps_ttm > 0 and yoy_val and yoy_val > 5 and op_pct and op_pct > 10:
+                news_text = fetch_news_text(ticker, is_tw)
+                
+                # 剖析成長原因
+                reasons = []
+                if yoy_val > 20: reasons.append(f"營收年增率高達 {yoy_val}%，展現強勁的市場需求與出貨動能")
+                else: reasons.append(f"營收年增率維持 {yoy_val}% 穩健成長")
+                if gm_pct and gm_pct > 40: reasons.append(f"毛利率達 {gm_pct}%，顯示產品具備高度定價權或技術護城河")
+                if op_pct and op_pct > 20: reasons.append(f"營業利益率達 {op_pct}%，本業獲利能力與費用控管極佳")
+                if "AI" in news_text or "伺服器" in news_text or "晶片" in news_text:
+                    reasons.append("近期市場新聞指出公司受惠於 AI 算力、雲端基建或先進製程規格升級趨勢")
+                
+                # 剖析潛在風險
+                risks = []
+                if dte_val and dte_val > 100:
+                    risks.append(f"負債權益比 (Debt/Equity) 達 {dte_val}%，財務槓桿偏高，需留意高利率環境下的利息負擔")
+                elif dte_val is None:
+                    risks.append("公開資料庫暫缺最新負債比率細節，需防範隱藏性財務槓桿風險")
+                else:
+                    risks.append(f"目前負債權益比為 {dte_val}%，財務結構尚屬穩健，惟需留意終端客戶拉貨是否出現季節性放緩")
+                
+                fwd_pe = info.get("forwardPE", 0)
+                if fwd_pe and fwd_pe > 25:
+                    risks.append(f"遠期本益比達 {round(fwd_pe, 1)} 倍，市場已反映部分樂觀預期，若未來營收增速放緩恐面臨估值修正")
+                if is_tw:
+                    risks.append("外銷導向產業需持續留意新台幣匯率波動對毛利率的潛在侵蝕")
+
+                # 還要確認的資訊
+                checks = [
+                    "下一次法說會或財報會議中，管理層對下一季毛利率與資本支出的最新指引 (Guidance)。",
+                    "營收成長是否來自實質終端需求擴大，而非客戶端短期提前拉貨（需交叉比對存貨週轉天數變化）。",
+                    "近期是否有可轉換公司債 (CB) 轉換、大股東申報轉讓，或高額資本支出導致自由現金流轉負的狀況。"
+                ]
+                
+                results.append({
+                    "ticker": stock_id if is_tw else ticker,
+                    "full_ticker": ticker,
+                    "name": name,
+                    "rev_str": rev_str,
+                    "yoy": f"{yoy_val}%",
+                    "eps_ttm": f"{eps_ttm:.2f}",
+                    "gm": f"{gm_pct}%" if gm_pct is not None else "N/A",
+                    "opm": f"{op_pct}%" if op_pct is not None else "N/A",
+                    "debt": f"負債權益比 {dte_val}%" if dte_val is not None else "需查閱財報附註",
+                    "reasons": "；".join(reasons) + "。",
+                    "risks": "；".join(risks) + "。",
+                    "checks": checks,
+                    "date": today_str,
+                    "source": source_str
+                })
+        except:
+            continue
+    return results
+
+def call_gemini_research_assistant(api_key, stock_data_list, market_name):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    prompt = f"""
+請你扮演一位專業的台美股研究助理，根據最近一期月營收、年增率、近四季 EPS、毛利率、營業利益率及負債狀況，篩選出基本面值得進一步研究的{market_name}。請列出股票代號、公司名稱、最新可查證的數據、成長原因、潛在風險，以及還要確認的資訊。請註明資料日期與來源，不要只因為股價上漲就判定它有潛力。
+
+以下是系統今日即時從公開資料庫抓取並初步篩選出的真實基本面數據 JSON：
+{json.dumps(stock_data_list, ensure_ascii=False, indent=2)}
+
+請嚴格根據上述真實數據（切勿自行編造數字），用台灣繁體中文撰寫深度的研究助理分析報告。
+"""
+    try:
+        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
+        if res.status_code == 200:
+            return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return f"⚠️ AI 連線失敗 (狀態碼 {res.status_code})，請確認 API Key 是否正確。"
+    except Exception as e:
+        return f"⚠️ 呼叫 AI 時發生錯誤：{e}"
 
 # === 4. 整合分析引擎 ===
 @st.cache_data(ttl=1800)
@@ -314,18 +455,116 @@ def color_us(val):
         return f'color: {color}; font-weight: bold;'
     return ''
 
-# === 7. 介面呈現 (四大整合分頁) ===
-tab_tw, tab_us, tab_alerts, tab_tearsheet = st.tabs([
+# === 7. 介面呈現 (五大整合分頁) ===
+tab_ai_rec, tab_tw, tab_us, tab_alerts, tab_tearsheet = st.tabs([
+    "🤖 AI 潛力股推薦",
     "🇹🇼 台股波段雷達", 
     "🇺🇸 美股波段雷達", 
     "🔔 智慧趨勢提醒與健檢", 
     "📄 一鍵個股簡報"
 ])
 
+# ----------------- 分頁 0：AI 基本面潛力股推薦 -----------------
+with tab_ai_rec:
+    st.header("🤖 專業台美股基本面研究助理")
+    st.markdown("""
+    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
+        <span style="font-size: 1.05em; font-weight: bold; color: #00cc96;">📋 研究助理篩選準則（每次開啟自動更新）：</span><br>
+        <span style="color: #d1d1d1;">
+        本模組嚴格依據<b>最近一期月營收、年增率、近四季 EPS、毛利率、營業利益率及負債狀況</b>進行客觀量化篩選，<b>絕不因為股價短期上漲就判定具備潛力</b>。<br>
+        系統已自動為您過濾出「營收年增 > 5%」、「近四季 EPS > 0」且「營業利益率 > 10%」之基本面績優標的：
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("🔑 進階設定：連結 Gemini API 啟動深度 AI 推理（選填）"):
+        gemini_key = st.text_input("輸入 Gemini API Key（留空則使用系統內建量化研究報告）", type="password")
+
+    col_r1, col_r2 = st.columns([4, 1])
+    with col_r2:
+        if st.button("🔄 強制重新抓取", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    with st.spinner("研究助理正在調閱台美股最新財報、月營收與負債數據..."):
+        tw_picks = screen_fundamental_stocks(is_tw=True)
+        us_picks = screen_fundamental_stocks(is_tw=False)
+
+    st.subheader("🇹🇼 台股基本面潛力研究名單")
+    if gemini_key and tw_picks:
+        with st.spinner("🤖 AI 研究助理正在撰寫台股深度報告..."):
+            st.markdown(call_gemini_research_assistant(gemini_key, tw_picks, "台股"))
+    elif tw_picks:
+        for item in tw_picks:
+            checks_html = "".join([f"<li>{c}</li>" for c in item["checks"]])
+            st.markdown(f"""
+            <div style="border-left: 5px solid #ff4b4b; padding: 15px; background-color: #1e1e1e; border-radius: 8px; margin-bottom: 16px;">
+                <h4 style="margin-top: 0; color: #ff4b4b;">📌 {item['ticker']} {item['name']}</h4>
+                <p style="margin-bottom: 8px;"><b>📊 最新可查證數據：</b><br>
+                • <b>最近期營收：</b>{item['rev_str']} (年增率 <b>{item['yoy']}</b>)<br>
+                • <b>獲利能力：</b>近四季 EPS <b>{item['eps_ttm']} 元</b> ｜ 毛利率 <b>{item['gm']}</b> ｜ 營業利益率 <b>{item['opm']}</b><br>
+                • <b>負債狀況：</b>{item['debt']}</p>
+                <p style="margin-bottom: 8px;"><b>🚀 成長原因：</b><span style="color:#00cc96;">{item['reasons']}</span></p>
+                <p style="margin-bottom: 8px;"><b>⚠️ 潛在風險：</b><span style="color:#ffc107;">{item['risks']}</span></p>
+                <div style="background-color: #2b2b2b; padding: 10px; border-radius: 5px; margin-top: 8px;">
+                    <b style="color: #63b3ed;">🔍 還要確認的資訊：</b>
+                    <ul style="margin-top: 5px; margin-bottom: 0; padding-left: 20px; color: #d1d1d1;">
+                        {checks_html}
+                    </ul>
+                </div>
+                <div style="text-align: right; margin-top: 6px;"><small style="color: gray;">📅 資料檢索日期：{item['date']} ｜ 📚 資料來源：{item['source']}</small></div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("目前候選池中暫無同時滿足所有嚴格基本面條件的台股。")
+
+    st.markdown("---")
+    st.subheader("🇺🇸 美股基本面潛力研究名單")
+    if gemini_key and us_picks:
+        with st.spinner("🤖 AI 研究助理正在撰寫美股深度報告..."):
+            st.markdown(call_gemini_research_assistant(gemini_key, us_picks, "美股"))
+    elif us_picks:
+        for item in us_picks:
+            checks_html = "".join([f"<li>{c}</li>" for c in item["checks"]])
+            st.markdown(f"""
+            <div style="border-left: 5px solid #00cc96; padding: 15px; background-color: #1e1e1e; border-radius: 8px; margin-bottom: 16px;">
+                <h4 style="margin-top: 0; color: #00cc96;">📌 {item['ticker']} ({item['name']})</h4>
+                <p style="margin-bottom: 8px;"><b>📊 最新可查證數據：</b><br>
+                • <b>最近期營收表現：</b>{item['rev_str']} (年增率 <b>{item['yoy']}</b>)<br>
+                • <b>獲利能力：</b>近四季 EPS <b>${item['eps_ttm']}</b> ｜ 毛利率 <b>{item['gm']}</b> ｜ 營業利益率 <b>{item['opm']}</b><br>
+                • <b>負債狀況：</b>{item['debt']}</p>
+                <p style="margin-bottom: 8px;"><b>🚀 成長原因：</b><span style="color:#00cc96;">{item['reasons']}</span></p>
+                <p style="margin-bottom: 8px;"><b>⚠️ 潛在風險：</b><span style="color:#ffc107;">{item['risks']}</span></p>
+                <div style="background-color: #2b2b2b; padding: 10px; border-radius: 5px; margin-top: 8px;">
+                    <b style="color: #63b3ed;">🔍 還要確認的資訊：</b>
+                    <ul style="margin-top: 5px; margin-bottom: 0; padding-left: 20px; color: #d1d1d1;">
+                        {checks_html}
+                    </ul>
+                </div>
+                <div style="text-align: right; margin-top: 6px;"><small style="color: gray;">📅 資料檢索日期：{item['date']} ｜ 📚 資料來源：{item['source']}</small></div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("目前候選池中暫無同時滿足所有嚴格基本面條件的美股。")
+
 # ----------------- 分頁 1：台股波段雷達 -----------------
 with tab_tw:
     st.header("🇹🇼 台股波段雷達")
     
+    st.markdown("""
+    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
+        <span style="font-size: 1.1em; font-weight: bold; color: #ff4b4b;">核心策略：20MA 回調買入法 + 多因子濾網</span><br>
+        <span style="color: #d1d1d1;">這套雷達旨在幫您避開「追高被套」的風險，專門尋找<b>大趨勢保護下，剛好拉回支撐</b>的潛力股。</span><br><br>
+        <span style="font-weight: bold; color: #ffffff;">🔍 動態掃描的篩選條件包含：</span><br>
+        <span style="color: #d1d1d1;">
+        1. <b>技術面 (隱藏多頭)</b>：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。<br>
+        2. <b>籌碼面 (大人照顧)</b>：自動串接 FinMind，可透過下方滑桿自訂過濾出近期外資或投信正在偷偷佈局的股票。<br>
+        3. <b>基本面 (估值評估)</b>：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。<br>
+        4. <b>消息面 (未來潛力)</b>：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.subheader("📌 自選觀察清單 (紅漲綠跌)")
     c_in, c_btn = st.columns([3, 1])
     with c_in:
@@ -334,6 +573,7 @@ with tab_tw:
         if st.button("➕ 新增", key="btn_add_tw", use_container_width=True):
             if new_tw:
                 tk = new_tw.upper()
+                if not tk.endswith(".TW"): tk += ".TW"
                 if tk not in st.session_state['watchlists']['TW']:
                     st.session_state['watchlists']['TW'].append(tk)
                     save_json(DB_WATCHLISTS, st.session_state['watchlists'])
@@ -385,18 +625,6 @@ with tab_tw:
 
     st.markdown("---")
     st.subheader("🔍 市場動態掃描 (非主流・隱藏多頭・籌碼共振)")
-    
-    with st.expander("💡 了解本系統的選股邏輯與策略"):
-        st.markdown("""
-        ### **核心策略：20MA 回調買入法 + 多因子濾網**
-        這套雷達旨在幫您避開「追高被套」的風險，專門尋找**大趨勢保護下，剛好拉回支撐**的潛力股。
-
-        🔍 **動態掃描的篩選條件包含：**
-        1. **技術面 (隱藏多頭)**：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。
-        2. **籌碼面 (大人照顧)**：自動串接 FinMind，可透過下方滑桿自訂過濾出近期外資或投信正在偷偷佈局的股票。
-        3. **基本面 (估值評估)**：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。
-        4. **消息面 (未來潛力)**：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
-        """)
 
     col1, col2 = st.columns(2)
     with col1: max_price_tw = st.number_input("最高股價 (台幣)", value=150, step=10, key="max_tw")
@@ -433,6 +661,19 @@ with tab_tw:
 with tab_us:
     st.header("🇺🇸 美股波段雷達")
     
+    st.markdown("""
+    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
+        <span style="font-size: 1.1em; font-weight: bold; color: #00cc96;">核心策略：20MA 回調買入法 + 多因子濾網</span><br>
+        <span style="color: #d1d1d1;">這套雷達旨在幫您避開「追高被套」的風險，專門尋找<b>大趨勢保護下，剛好拉回支撐</b>的潛力美股。</span><br><br>
+        <span style="font-weight: bold; color: #ffffff;">🔍 動態掃描的篩選條件包含：</span><br>
+        <span style="color: #d1d1d1;">
+        1. <b>技術面 (隱藏多頭)</b>：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。<br>
+        2. <b>基本面 (估值評估)</b>：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。<br>
+        3. <b>消息面 (未來潛力)</b>：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
     st.subheader("📌 自選觀察清單 (綠漲紅跌)")
     c_in_us, c_btn_us = st.columns([3, 1])
     with c_in_us:
@@ -492,17 +733,6 @@ with tab_us:
     st.markdown("---")
     st.subheader("🔍 市場動態掃描 (中小型・非熱門巨頭・隱藏多頭)")
     
-    with st.expander("💡 了解本系統的選股邏輯與策略"):
-        st.markdown("""
-        ### **核心策略：20MA 回調買入法 + 多因子濾網**
-        這套雷達旨在幫您避開「追高被套」的風險，專門尋找**大趨勢保護下，剛好拉回支撐**的潛力股。
-
-        🔍 **動態掃描的篩選條件包含：**
-        1. **技術面 (隱藏多頭)**：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。
-        2. **基本面 (估值評估)**：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。
-        3. **消息面 (未來潛力)**：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
-        """)
-
     col_u1, col_u2 = st.columns([1, 1])
     with col_u1: max_price_us = st.number_input("最高股價 (美元)", value=150, step=10, key="max_us")
     with col_u2: 
@@ -535,29 +765,26 @@ with tab_alerts:
     st.header("🧠 情境式智慧趨勢監控與持股健檢")
     st.markdown("設定專屬監控標的，系統會在技術面達標、或到達特定日期/價格時跳出具體行動建議。")
     
-    with st.expander("💡 了解智慧情境監控觸發條件與說明"):
-        st.markdown("""
-        ### **智慧情境監控觸發條件說明**
-        本系統會根據您的持股狀態與設定，自動偵測並跳出以下情境提醒：
-
-        🔴 **持股風險升高 (趨勢轉弱)**
-        * **發生什麼事**：股價跌破設定的防守線或 20 日均線。
-        * **系統建議**：請檢查目前持股風險、原定停損條件及部位大小。這是風險提醒，不代表必須立即殺出，請先評估自身承受度。
-        * **失效條件**：若三日內能帶量強勢站回 20 日均線之上，則危機解除。
-
-        🟢 **趨勢轉強 (加碼評估)**
-        * **發生什麼事**：股價帶量突破前日高點，且維持在均線之上。
-        * **系統建議**：可評估是否符合你的加碼計畫；請同時確認距離停損位置的幅度與新增部位的風險。
-        * **失效條件**：若接下來兩日無量下跌跌破今日低點，則轉強訊號失效。
-        
-        🟡 **初步止跌 (觀察中)**
-        * **發生什麼事**：股價接近近期低點，且連續兩日未再創新低。
-        * **系統建議**：可觀察是否能帶量突破短期下降趨勢線。建議先觀察，不急著摸底買進。
-        
-        🎯 **反彈確認 (可評估進場)**
-        * **發生什麼事**：股價帶量突破 20 日均線，且 RSI 站上 50 多空分界。
-        * **系統建議**：可評估小量進場試單。請先確認失效條件，並將停損設於突破起漲點下方。
-        """)
+    st.markdown("""
+    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
+        <span style="font-size: 1.1em; font-weight: bold; color: #ffc107;">🧠 智慧趨勢情境條件說明與標準</span><br>
+        <span style="color: #d1d1d1;">本系統針對持股與空手狀態，自動偵測以下情境並給予具體行動建議：</span><br><br>
+        <span style="font-weight: bold; color: #ff4b4b;">🔴 持股風險升高 (趨勢轉弱)</span><br>
+        <span style="color: #d1d1d1;">
+        - <b>發生什麼事</b>：股價跌破設定的防守線或 20 日均線。<br>
+        - <b>為什麼提醒</b>：股價跌破重要趨勢支撐，原本的多頭格局受到破壞。<br>
+        - <b>建議下一步</b>：請檢查目前持股風險、原定停損條件及部位大小。這是風險提醒，不代表必須立即殺出，請先評估自身承受度。<br>
+        - <b>失效條件</b>：若三日內能帶量強勢站回 20 日均線之上，則危機解除。
+        </span><br><br>
+        <span style="font-weight: bold; color: #00cc96;">🟢 趨勢轉強 (加碼評估)</span><br>
+        <span style="color: #d1d1d1;">
+        - <b>發生什麼事</b>：股價帶量突破前日高點，且維持在均線之上。<br>
+        - <b>為什麼提醒</b>：出現明顯的右側轉強訊號，趨勢向上確立。<br>
+        - <b>建議下一步</b>：可評估是否符合你的加碼計畫；請同時確認距離停損位置的幅度與新增部位的風險。<br>
+        - <b>失效條件</b>：若接下來兩日無量下跌跌破今日低點，則轉強訊號失效。
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.subheader("⚙️ 新增 / 編輯監控規則")
     with st.form("alert_config_form"):
