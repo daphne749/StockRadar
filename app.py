@@ -642,3 +642,385 @@ with tab_tw:
     
     if tw_overview:
         df_tw_view = pd.DataFrame(tw_overview)
+        df_tw_view.insert(0, "🗑️ 刪除", False)
+        
+        edited_tw = st.data_editor(
+            df_tw_view.style.map(color_tw, subset=['單日漲跌(%)', '近一月漲跌(%)']),
+            use_container_width=True,
+            hide_index=True,
+            key=f"tw_editor_{st.session_state.tw_edit_key}",
+            column_config={
+                "🗑️ 刪除": st.column_config.CheckboxColumn("刪除", default=False),
+                "收盤價": st.column_config.NumberColumn(format="%.2f"),
+                "單日漲跌(%)": st.column_config.NumberColumn(format="%.2f"),
+                "近一月漲跌(%)": st.column_config.NumberColumn(format="%.2f"),
+                "防守停損": st.column_config.NumberColumn(format="%.2f"),
+                "停利目標": st.column_config.NumberColumn(format="%.2f"),
+            },
+            disabled=[col for col in df_tw_view.columns if col != "🗑️ 刪除"]
+        )
+        
+        deleted_tw = edited_tw[edited_tw["🗑️ 刪除"] == True]
+        if not deleted_tw.empty:
+            del_list = deleted_tw["標的"].tolist()
+            st.warning(f"⚠️ 確定要從觀察清單中刪除 **{', '.join(del_list)}** 嗎？")
+            col_y, col_n = st.columns(2)
+            with col_y:
+                if st.button("✅ 確認刪除", use_container_width=True, key="tw_del_yes"):
+                    for t in del_list:
+                        tk_full = f"{t.split(' ')[0]}.TW"
+                        if tk_full in st.session_state['watchlists']['TW']:
+                            st.session_state['watchlists']['TW'].remove(tk_full)
+                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                    st.session_state.tw_edit_key += 1 
+                    st.rerun()
+            with col_n:
+                if st.button("❌ 取消", use_container_width=True, key="tw_del_no"):
+                    st.session_state.tw_edit_key += 1 
+                    st.rerun()
+    else:
+        st.info("台股觀察清單目前為空，請從上方輸入代號新增。")
+
+    st.markdown("---")
+    st.subheader("🔍 市場動態掃描 (非主流・隱藏多頭・籌碼共振)")
+
+    col1, col2 = st.columns(2)
+    with col1: max_price_tw = st.number_input("最高股價 (台幣)", value=150, step=10, key="max_tw")
+    with col2: min_foreign = st.slider("外資近5日買超 > (張)", 0, 5000, 0, 500)
+    
+    col3, col4 = st.columns(2)
+    with col3: min_trust = st.slider("投信近5日買超 > (張)", 0, 2000, 0, 100)
+    with col4:
+        st.write("")
+        stealth_only = st.checkbox("只抓隱藏多頭", value=True)
+        
+    if st.button("🚀 執行台股動態掃描", type="primary", use_container_width=True):
+        with st.spinner("掃描市場與計算中..."):
+            TW_BROAD_POOL = ["1504.TW", "1519.TW", "1605.TW", "2313.TW", "2368.TW", "2520.TW", "2609.TW", "2618.TW", "3017.TW", "3231.TW", "3324.TW", "8996.TW", "9958.TW", "2308.TW", "2376.TW"]
+            scan_res, eps_res = [], []
+            for t in TW_BROAD_POOL:
+                res = analyze_stock_master(t, is_tw=True, max_price=max_price_tw, min_foreign=min_foreign, min_trust=min_trust, filter_stealth=stealth_only)
+                if res:
+                    scan_res.append(res["overview"])
+                    eps_res.append(res["eps_details"])
+            
+            if scan_res:
+                st.success(f"✅ 發現優質標的！")
+                st.dataframe(
+                    pd.DataFrame(scan_res).style.map(color_tw, subset=['單日漲跌(%)', '近一月漲跌(%)']),
+                    use_container_width=True, hide_index=True
+                )
+                with st.expander("📊 點擊展開 EPS 獲利分析表"):
+                    st.table(pd.DataFrame(eps_res))
+                
+                tg_lines = [f"<b>🇹🇼 台股波段雷達掃描結果 ({datetime.date.today()})</b>\n"]
+                for r in scan_res:
+                    tg_lines.append(f"• <b>{r['標的']}</b>｜現價 {r['收盤價']:.2f}｜{r['綜合決策']}｜停損 {r['防守停損']:.2f} / 停利 {r['停利目標']:.2f}")
+                ok, s_msg = send_telegram_msg("\n".join(tg_lines))
+                if ok: st.toast("📲 已同步推播台股掃描結果至 Telegram！")
+            else:
+                st.info("💡 今日掃描池中，沒有符合技術面買點的股票。")
+
+# ----------------- 分頁 2：美股波段雷達 -----------------
+with tab_us:
+    st.header("🇺🇸 美股波段雷達")
+    
+    st.markdown("""
+    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
+        <span style="font-size: 1.1em; font-weight: bold; color: #00cc96;">核心策略：20MA 回調買入法 + 多因子濾網</span><br>
+        <span style="color: #d1d1d1;">這套雷達旨在幫您避開「追高被套」的風險，專門尋找<b>大趨勢保護下，剛好拉回支撐</b>的潛力美股。</span><br><br>
+        <span style="font-weight: bold; color: #ffffff;">🔍 動態掃描的篩選條件包含：</span><br>
+        <span style="color: #d1d1d1;">
+        1. <b>技術面 (隱藏多頭)</b>：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。<br>
+        2. <b>基本面 (估值評估)</b>：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。<br>
+        3. <b>消息面 (未來潛力)</b>：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.subheader("📌 自選觀察清單 (綠漲紅跌)")
+    c_in_us, c_btn_us = st.columns([3, 1])
+    with c_in_us:
+        new_us = st.text_input("新增美股", placeholder="輸入代號 (例如: TSLA)", label_visibility="collapsed", key="add_us_input")
+    with c_btn_us:
+        if st.button("➕ 新增", key="btn_add_us", use_container_width=True):
+            if new_us:
+                tk = new_us.upper()
+                if tk not in st.session_state['watchlists']['US']:
+                    st.session_state['watchlists']['US'].append(tk)
+                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                    st.rerun()
+
+    us_data = [analyze_stock_master(t, is_tw=False) for t in st.session_state['watchlists']['US']]
+    us_overview = [d["overview"] for d in us_data if d]
+    
+    if us_overview:
+        df_us_view = pd.DataFrame(us_overview)
+        df_us_view.insert(0, "🗑️ 刪除", False)
+        
+        edited_us = st.data_editor(
+            df_us_view.style.map(color_us, subset=['單日漲跌(%)', '近一月漲跌(%)']),
+            use_container_width=True,
+            hide_index=True,
+            key=f"us_editor_{st.session_state.us_edit_key}",
+            column_config={
+                "🗑️ 刪除": st.column_config.CheckboxColumn("刪除", default=False),
+                "收盤價": st.column_config.NumberColumn(format="%.2f"),
+                "單日漲跌(%)": st.column_config.NumberColumn(format="%.2f"),
+                "近一月漲跌(%)": st.column_config.NumberColumn(format="%.2f"),
+                "防守停損": st.column_config.NumberColumn(format="%.2f"),
+                "停利目標": st.column_config.NumberColumn(format="%.2f"),
+            },
+            disabled=[col for col in df_us_view.columns if col != "🗑️ 刪除"]
+        )
+        
+        deleted_us = edited_us[edited_us["🗑️ 刪除"] == True]
+        if not deleted_us.empty:
+            del_list_us = deleted_us["標的"].tolist()
+            st.warning(f"⚠️ 確定要從觀察清單中刪除 **{', '.join(del_list_us)}** 嗎？")
+            col_y_us, col_n_us = st.columns(2)
+            with col_y_us:
+                if st.button("✅ 確認刪除", use_container_width=True, key="us_del_yes"):
+                    for t in del_list_us:
+                        if t in st.session_state['watchlists']['US']:
+                            st.session_state['watchlists']['US'].remove(t)
+                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                    st.session_state.us_edit_key += 1
+                    st.rerun()
+            with col_n_us:
+                if st.button("❌ 取消", use_container_width=True, key="us_del_no"):
+                    st.session_state.us_edit_key += 1
+                    st.rerun()
+    else:
+        st.info("美股觀察清單目前為空，請從上方輸入代號新增。")
+
+    st.markdown("---")
+    st.subheader("🔍 市場動態掃描 (中小型・非熱門巨頭・隱藏多頭)")
+    
+    col_u1, col_u2 = st.columns([1, 1])
+    with col_u1: max_price_us = st.number_input("最高股價 (美元)", value=150, step=10, key="max_us")
+    with col_u2: 
+        st.write("")
+        scan_us_btn = st.button("🚀 執行美股動態掃描", type="primary", use_container_width=True)
+
+    if scan_us_btn:
+        with st.spinner("掃描板塊與計算中..."):
+            US_BROAD_POOL = ["FOUR", "VRT", "ONON", "CELH", "ELF", "UBER", "HOOD", "RDDT", "WING", "DKNG", "PLTR", "DDOG", "CRWD", "ARM"]
+            scan_res_us, eps_res_us = [], []
+            for t in US_BROAD_POOL:
+                res = analyze_stock_master(t, is_tw=False, max_price=max_price_us, filter_stealth=True)
+                if res:
+                    scan_res_us.append(res["overview"])
+                    eps_res_us.append(res["eps_details"])
+            
+            if scan_res_us:
+                st.success("✅ 發現潛力美股！")
+                st.dataframe(
+                    pd.DataFrame(scan_res_us).style.map(color_us, subset=['單日漲跌(%)', '近一月漲跌(%)']), 
+                    use_container_width=True, hide_index=True
+                )
+                with st.expander("📊 點擊展開 EPS 獲利分析表"):
+                    st.table(pd.DataFrame(eps_res_us))
+                
+                tg_lines_us = [f"<b>🇺🇸 美股波段雷達掃描結果 ({datetime.date.today()})</b>\n"]
+                for r in scan_res_us:
+                    tg_lines_us.append(f"• <b>{r['標的']}</b>｜現價 ${r['收盤價']:.2f}｜{r['綜合決策']}｜停損 ${r['防守停損']:.2f} / 停利 ${r['停利目標']:.2f}")
+                ok, s_msg = send_telegram_msg("\n".join(tg_lines_us))
+                if ok: st.toast("📲 已同步推播美股掃描結果至 Telegram！")
+            else:
+                st.info("💡 今日市場無符合條件的標的。")
+
+# ----------------- 分頁 3：智慧趨勢提醒與健檢 -----------------
+with tab_alerts:
+    st.header("🧠 情境式智慧趨勢監控與持股健檢")
+    st.markdown("設定專屬監控標的，系統會在技術面達標、或到達特定日期/價格時跳出具體行動建議並同步推播至 Telegram。")
+    
+    # Telegram 設定與測試區塊
+    with st.expander("📲 Telegram 自動推播連線設定與測試", expanded=True):
+        cur_token, cur_chat_id = get_tg_credentials()
+        if cur_token and cur_chat_id:
+            st.success(f"✅ 已讀取 Telegram 連線設定 (Chat ID: `{cur_chat_id}`)")
+        else:
+            st.warning("⚠️ 尚未讀取到 Secrets 設定，請確認已於 Streamlit Cloud Settings -> Secrets 儲存，或於下方暫時輸入測試。")
+        
+        c_tg1, c_tg2 = st.columns(2)
+        with c_tg1:
+            in_token = st.text_input("Bot Token (若已設 Secrets 可留空)", type="password", key="tg_tk_in")
+            if in_token: st.session_state["custom_tg_token"] = in_token
+        with c_tg2:
+            in_cid = st.text_input("Chat ID (若已設 Secrets 可留空)", key="tg_cid_in")
+            if in_cid: st.session_state["custom_tg_chat_id"] = in_cid
+            
+        if st.button("📨 發送 Telegram 測試訊息", use_container_width=True):
+            ok, msg = send_telegram_msg("🔔 <b>波段選股雷達連線測試成功！</b>\n您的智慧趨勢提醒與策略掃描訊號已準備就緒。")
+            if ok: st.success("✅ 測試訊息已發送！請查看您的手機 Telegram。")
+            else: st.error(f"❌ 發送失敗：{msg}")
+
+    st.markdown("""
+    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
+        <span style="font-size: 1.1em; font-weight: bold; color: #ffc107;">🧠 智慧趨勢情境條件說明與標準</span><br>
+        <span style="color: #d1d1d1;">本系統針對持股與空手狀態，自動偵測以下情境並給予具體行動建議：</span><br><br>
+        <span style="font-weight: bold; color: #ff4b4b;">🔴 持股風險升高 (趨勢轉弱)</span><br>
+        <span style="color: #d1d1d1;">
+        - <b>發生什麼事</b>：股價跌破設定的防守線或 20 日均線。<br>
+        - <b>為什麼提醒</b>：股價跌破重要趨勢支撐，原本的多頭格局受到破壞。<br>
+        - <b>建議下一步</b>：請檢查目前持股風險、原定停損條件及部位大小。這是風險提醒，不代表必須立即殺出，請先評估自身承受度。<br>
+        - <b>失效條件</b>：若三日內能帶量強勢站回 20 日均線之上，則危機解除。
+        </span><br><br>
+        <span style="font-weight: bold; color: #00cc96;">🟢 趨勢轉強 (加碼評估)</span><br>
+        <span style="color: #d1d1d1;">
+        - <b>發生什麼事</b>：股價帶量突破前日高點，且維持在均線之上。<br>
+        - <b>為什麼提醒</b>：出現明顯的右側轉強訊號，趨勢向上確立。<br>
+        - <b>建議下一步</b>：可評估是否符合你的加碼計畫；請同時確認距離停損位置的幅度與新增部位的風險。<br>
+        - <b>失效條件</b>：若接下來兩日無量下跌跌破今日低點，則轉強訊號失效。
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.subheader("⚙️ 新增 / 編輯監控規則")
+    with st.form("alert_config_form"):
+        ticker_input = st.text_input("股票代號 (台股請加 .TW)", placeholder="例如: 2603.TW")
+        status_input = st.radio("交易目的", ["準備進場 (尚未持有)", "停利/風險管理 (已持有)"])
+        cost_input = st.number_input("持有平均成本 (空手請填 0)", min_value=0.0, step=1.0)
+        note_input = st.text_area("個人紀律筆記", placeholder="例如：等下週四法說會開完再決定。")
+        
+        enable_date = st.checkbox("設定日期提醒")
+        date_input = st.date_input("選擇提醒日", value=datetime.date.today()) if enable_date else None
+        target_price_input = st.number_input("到達特定價格提醒 (0代表不設定)", min_value=0.0, step=1.0)
+        
+        if st.form_submit_button("💾 儲存監控規則與筆記", use_container_width=True):
+            if ticker_input:
+                ticker = ticker_input.upper()
+                st.session_state['user_config'][ticker] = {
+                    "status": "holding" if "已持有" in status_input else "observing",
+                    "cost": cost_input, "note": note_input, "target_price": target_price_input,
+                    "reminder_date": date_input.strftime("%Y-%m-%d") if enable_date else ""
+                }
+                save_json(DB_ALERTS, st.session_state['user_config'])
+                st.success(f"已更新 {ticker} 的監控規則！")
+                
+    st.markdown("---")
+    st.subheader("📩 趨勢通知與多維健檢中心")
+    config = st.session_state['user_config']
+    if not config: 
+        st.info("目前沒有監控中的標的。請從上方新增設定。")
+    else:
+        auto_push_tg = st.checkbox("📲 掃描觸發警報時自動推播至 Telegram", value=True)
+        if st.button("🔄 立即執行全盤掃描與健檢", type="primary", use_container_width=True):
+            with st.spinner("正在進行多面向情境診斷..."):
+                alerts_found = 0
+                tg_alert_messages = []
+                for ticker, settings in config.items():
+                    alert_data = generate_smart_alert(ticker, settings)
+                    
+                    if alert_data:
+                        alerts_found += 1
+                        border_color = "#ff4b4b" if "風險" in alert_data["目前階段"] else "#00cc96" if "確認" in alert_data["目前階段"] else "#ffc107"
+                        
+                        custom_html = ""
+                        custom_tg = ""
+                        if alert_data.get("自訂觸發項目"):
+                            for msg in alert_data["自訂觸發項目"]:
+                                custom_html += f"<div style='color: #ffc107; font-weight: bold; margin-bottom: 5px;'>{msg}</div>"
+                                custom_tg += f"\n{msg.replace('**', '')}"
+                                
+                        note_text = alert_data.get('個人筆記', '')
+                        note_html = f"<i style='color: #bbb;'>{note_text}</i>" if note_text else "<i style='color: #666;'>無</i>"
+
+                        display_ticker_alert = ticker.replace(".TW", "")
+                        if ".TW" in ticker and display_ticker_alert in TW_STOCK_NAMES:
+                            display_ticker_alert = f"{display_ticker_alert} {TW_STOCK_NAMES[display_ticker_alert]}"
+
+                        tg_block = (
+                            f"<b>🚨 {display_ticker_alert} - {alert_data['目前階段']}</b>{custom_tg}\n"
+                            f"• <b>發生什麼事：</b>{alert_data['發生什麼事']}\n"
+                            f"• <b>🎯 建議下一步：</b>{alert_data['建議下一步']}\n"
+                            f"• <b>⚠️ 失效條件：</b>{alert_data['失效條件']}\n"
+                            f"• <b>📝 決策筆記：</b>{note_text if note_text else '無'}"
+                        )
+                        tg_alert_messages.append(tg_block)
+
+                        st.markdown(f"""
+                        <div style="border-left: 5px solid {border_color}; padding: 15px; background-color: #1e1e1e; border-radius: 8px; margin-bottom: 20px;">
+                            <h4 style="margin-top: 0; color: {border_color};">{display_ticker_alert} - {alert_data['目前階段']}</h4>
+                            {custom_html}
+                            <ul style="margin-top: 10px; margin-bottom: 10px; padding-left: 20px;">
+                                <li><b>發生什麼事：</b>{alert_data['發生什麼事']}</li>
+                                <li><b>為什麼提醒：</b>{alert_data['為什麼提醒']}</li>
+                                <li><b>🎯 建議下一步：</b><span style="color:#00cc96;">{alert_data['建議下一步']}</span></li>
+                                <li><b>⚠️ 失效條件：</b><span style="color:#ff4b4b;">{alert_data['失效條件']}</span></li>
+                            </ul>
+                            <div style="background-color: #2b2b2b; padding: 10px; border-radius: 5px; margin-top: 10px; border: 1px dashed #555;">
+                                <span style="color: #00cc96; font-weight: bold;">📝 當時的決策筆記：</span><br>
+                                {note_html}
+                            </div>
+                            <div style="text-align: right; margin-top: 5px;"><small style="color: gray;">更新基準：{alert_data.get('時間與週期', '')}</small></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                if alerts_found == 0: 
+                    st.success("✅ 掃描完畢。您監控的股票走勢符合預期，且未達自訂觸發條件。")
+                elif auto_push_tg and tg_alert_messages:
+                    full_tg_text = f"<b>🔔 智慧趨勢監控警報 ({datetime.date.today()})</b>\n\n" + "\n\n━━━━━━━━━━\n\n".join(tg_alert_messages)
+                    ok, msg = send_telegram_msg(full_tg_text)
+                    if ok: st.success("📲 已自動將上述觸發警報推播至您的 Telegram！")
+                    else: st.warning(f"⚠️ Telegram 自動推播未完成：{msg}")
+
+# ----------------- 分頁 4：一鍵個股簡報 -----------------
+with tab_tearsheet:
+    st.header("📄 機構級一鍵個股快照")
+    st.markdown("輸入代號，自動產出結構化簡報。")
+    
+    c_ts_in, c_ts_btn = st.columns([3, 1])
+    with c_ts_in:
+        ts_ticker = st.text_input("輸入股票代號", placeholder="例如: 2330.TW", label_visibility="collapsed")
+    with c_ts_btn:
+        ts_submit = st.button("📊 生成", use_container_width=True)
+
+    if ts_submit and ts_ticker:
+        with st.spinner("彙整全球資料庫中..."):
+            stock = yf.Ticker(ts_ticker.upper())
+            info = stock.info
+            
+            base_ticker = ts_ticker.upper().replace(".TW", "")
+            if ".TW" in ts_ticker.upper() and base_ticker in TW_STOCK_NAMES:
+                name = TW_STOCK_NAMES[base_ticker]
+            else:
+                name = info.get("longName", info.get("shortName", ts_ticker))
+                
+            sector = info.get("sector", "無資料")
+            industry = info.get("industry", "無資料")
+            summary = info.get("longBusinessSummary", "暫無業務簡介資料。")
+            pe = info.get("trailingPE", "N/A")
+            fwd_pe = info.get("forwardPE", "N/A")
+            eps = info.get("trailingEps", "N/A")
+            dividend = info.get("dividendYield", 0) * 100 if info.get("dividendYield") else "N/A"
+            high_52 = info.get("fiftyTwoWeekHigh", "N/A")
+            low_52 = info.get("fiftyTwoWeekLow", "N/A")
+            current_price = info.get("currentPrice", info.get("previousClose", "N/A"))
+            
+            st.markdown(f"## 🏢 {name} ({ts_ticker.upper()})")
+            st.markdown(f"**板塊 / 產業：** {sector} / {industry}")
+            
+            c1, c2 = st.columns(2)
+            c1.metric("目前報價", f"{current_price}")
+            c2.metric("近四季 EPS", f"{eps}")
+            c3, c4 = st.columns(2)
+            c3.metric("本益比 (PE)", f"{round(pe, 2) if isinstance(pe, float) else pe}")
+            c4.metric("殖利率", f"{round(dividend, 2)}%" if isinstance(dividend, float) else "N/A")
+            
+            st.markdown("### 📋 業務概覽")
+            st.info(summary)
+            
+            st.markdown("### 📈 估值與價格位階")
+            st.write(f"- **52週高點 / 低點**：{high_52} / {low_52}")
+            st.write(f"- **遠期本益比 (Forward PE)**：{round(fwd_pe, 2) if isinstance(fwd_pe, float) else fwd_pe}")
+            
+            st.markdown("### 📰 近期市場關鍵字偵測")
+            news_html = fetch_news_text(ts_ticker, ".TW" in ts_ticker)
+            if any(k in news_html for k in ["創新高", "大增", "看好", "受惠"]): 
+                st.success("雷達偵測到近期包含「創新高、大增、看好」等正面關鍵字。")
+            elif any(k in news_html for k in ["衰退", "下修", "轉虧"]): 
+                st.error("雷達偵測到近期包含「衰退、下修」等保守關鍵字。")
+            else: 
+                st.write("近期新聞情緒平穩。")
