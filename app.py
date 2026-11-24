@@ -4,6 +4,7 @@ import pandas as pd
 import datetime
 import json
 import os
+import base64
 import requests
 import urllib.parse
 import socket
@@ -20,6 +21,76 @@ st.markdown("""
 
 st.title("📈 雙引擎波段選股雷達")
 st.markdown("💰 **資金風控**：每單 30,000 TWD | 🎯 **核心策略**：20MA 回調買入 + 30% 停利 + 智慧情境監控")
+
+# === GitHub 雲端雙向同步模組 ===
+def get_github_config():
+    try:
+        token = str(st.secrets.get("GITHUB_TOKEN", "")).strip()
+        repo = str(st.secrets.get("GITHUB_REPO", "daphne749/StockRadar")).strip()
+        return token, repo
+    except Exception:
+        return "", "daphne749/StockRadar"
+
+def load_json_sync(file_path, default_data):
+    token, repo = get_github_config()
+    if token:
+        url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                content_b64 = res.json().get("content", "")
+                decoded = base64.b64decode(content_b64).decode("utf-8")
+                return json.loads(decoded)
+        except Exception:
+            pass
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default_data
+
+def save_json_sync(file_path, data):
+    # 先寫入本機暫存
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+    # 若有設定 GITHUB_TOKEN，同步寫回 GitHub
+    token, repo = get_github_config()
+    if not token:
+        return False, "僅儲存於暫存區（尚未設定 GITHUB_TOKEN）"
+
+    url = f"https://api.github.com/repos/{repo}/contents/{file_path}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    try:
+        sha = None
+        get_res = requests.get(url, headers=headers, timeout=10)
+        if get_res.status_code == 200:
+            sha = get_res.json().get("sha")
+
+        content_str = json.dumps(data, ensure_ascii=False, indent=4)
+        content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+        payload = {
+            "message": f"Update {file_path} via StockRadar Web",
+            "content": content_b64
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_res = requests.put(url, headers=headers, json=payload, timeout=12)
+        if put_res.status_code in (200, 201):
+            return True, "已自動同步至 GitHub 排程清單"
+        return False, f"GitHub 同步失敗 ({put_res.status_code})"
+    except Exception as e:
+        return False, f"GitHub 同步異常：{e}"
 
 # === Discord Webhook 推播核心模組 (自動分段 + 強制 IPv4 穩定通道) ===
 def get_discord_webhook():
@@ -73,7 +144,7 @@ def send_discord_msg(text):
         urllib3_cn.allowed_gai_family = orig_family
 
 # === 內建台股中文名稱全自動動態字典 ===
-@st.cache_data(ttl=86400) 
+@st.cache_data(ttl=86400)
 def get_all_tw_stock_names():
     url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
     try:
@@ -97,20 +168,12 @@ TW_STOCK_NAMES = get_all_tw_stock_names()
 DB_ALERTS = "user_alerts_config.json"
 DB_WATCHLISTS = "watchlists.json"
 
-def load_json(file_path, default_data):
-    if os.path.exists(file_path):
-        with open(file_path, "r", encoding="utf-8") as f: return json.load(f)
-    return default_data
-
-def save_json(file_path, data):
-    with open(file_path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=4)
-
 if 'user_config' not in st.session_state:
-    st.session_state['user_config'] = load_json(DB_ALERTS, {})
+    st.session_state['user_config'] = load_json_sync(DB_ALERTS, {})
 
 if 'watchlists' not in st.session_state:
     default_wl = {"TW": ["2330.TW", "2454.TW", "2603.TW", "1519.TW"], "US": ["AAPL", "MSFT", "NVDA", "COIN"]}
-    st.session_state['watchlists'] = load_json(DB_WATCHLISTS, default_wl)
+    st.session_state['watchlists'] = load_json_sync(DB_WATCHLISTS, default_wl)
 
 if 'tw_edit_key' not in st.session_state: st.session_state.tw_edit_key = 0
 if 'us_edit_key' not in st.session_state: st.session_state.us_edit_key = 0
@@ -133,7 +196,7 @@ def calculate_indicators(df):
     return df
 
 def fetch_news_text(ticker, is_tw):
-    search_term = ticker.replace(".TW", "") + (" 股票" if is_tw else " stock news")
+    search_term = ticker.replace(".TW", "").replace(".TWO", "") + (" 股票" if is_tw else " stock news")
     query = urllib.parse.quote(search_term)
     url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW"
     try:
@@ -151,8 +214,9 @@ def check_future_potential(news_text, eps_growth):
 
 @st.cache_data(ttl=1800)
 def get_finmind_chips(ticker, days=5):
-    if not ticker.endswith(".TW"): return {"外資買賣超": 0, "投信買賣超": 0, "狀態": "美股不適用"}
-    stock_id = ticker.replace(".TW", "")
+    if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
+        return {"外資買賣超": 0, "投信買賣超": 0, "狀態": "美股不適用"}
+    stock_id = ticker.replace(".TW", "").replace(".TWO", "")
     start_date = (datetime.date.today() - datetime.timedelta(days=days+6)).strftime("%Y-%m-%d")
     url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id={stock_id}&start_date={start_date}"
     try:
@@ -217,7 +281,7 @@ def screen_fundamental_stocks(is_tw=True):
             op_pct = round(op_margin * 100, 2) if op_margin is not None else None
             dte_val = round(debt_to_equity, 2) if debt_to_equity is not None else None
             
-            stock_id = ticker.replace(".TW", "")
+            stock_id = ticker.replace(".TW", "").replace(".TWO", "")
             if is_tw:
                 name = TW_STOCK_NAMES.get(stock_id, info.get("shortName", stock_id))
                 rev_data = get_tw_monthly_revenue(stock_id)
@@ -369,7 +433,7 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
 
     affordable_shares = int(30000 // latest_price) if is_tw else round((30000 / 32) / latest_price, 2)
 
-    display_ticker = ticker.replace(".TW", "")
+    display_ticker = ticker.replace(".TW", "").replace(".TWO", "")
     if is_tw:
         stock_name = TW_STOCK_NAMES.get(display_ticker, "")
         if stock_name:
@@ -632,15 +696,15 @@ with tab_tw:
     st.subheader("📌 自選觀察清單 (紅漲綠跌)")
     c_in, c_btn = st.columns([3, 1])
     with c_in:
-        new_tw = st.text_input("新增台股", placeholder="輸入代號 (例如: 2317.TW)", label_visibility="collapsed", key="add_tw_input")
+        new_tw = st.text_input("新增台股", placeholder="輸入代號 (上市加 .TW、上櫃加 .TWO，例: 2317.TW)", label_visibility="collapsed", key="add_tw_input")
     with c_btn:
         if st.button("➕ 新增", key="btn_add_tw", use_container_width=True):
             if new_tw:
-                tk = new_tw.upper()
-                if not tk.endswith(".TW"): tk += ".TW"
+                tk = new_tw.strip().upper()
+                if not (tk.endswith(".TW") or tk.endswith(".TWO")): tk += ".TW"
                 if tk not in st.session_state['watchlists']['TW']:
                     st.session_state['watchlists']['TW'].append(tk)
-                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                    save_json_sync(DB_WATCHLISTS, st.session_state['watchlists'])
                     st.rerun()
 
     tw_data = [analyze_stock_master(t, is_tw=True) for t in st.session_state['watchlists']['TW']]
@@ -674,10 +738,12 @@ with tab_tw:
             with col_y:
                 if st.button("✅ 確認刪除", use_container_width=True, key="tw_del_yes"):
                     for t in del_list:
-                        tk_full = f"{t.split(' ')[0]}.TW"
-                        if tk_full in st.session_state['watchlists']['TW']:
-                            st.session_state['watchlists']['TW'].remove(tk_full)
-                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                        code = t.split(' ')[0]
+                        st.session_state['watchlists']['TW'] = [
+                            x for x in st.session_state['watchlists']['TW']
+                            if not x.startswith(code + ".")
+                        ]
+                    save_json_sync(DB_WATCHLISTS, st.session_state['watchlists'])
                     st.session_state.tw_edit_key += 1 
                     st.rerun()
             with col_n:
@@ -751,10 +817,10 @@ with tab_us:
     with c_btn_us:
         if st.button("➕ 新增", key="btn_add_us", use_container_width=True):
             if new_us:
-                tk = new_us.upper()
+                tk = new_us.strip().upper()
                 if tk not in st.session_state['watchlists']['US']:
                     st.session_state['watchlists']['US'].append(tk)
-                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                    save_json_sync(DB_WATCHLISTS, st.session_state['watchlists'])
                     st.rerun()
 
     us_data = [analyze_stock_master(t, is_tw=False) for t in st.session_state['watchlists']['US']]
@@ -790,7 +856,7 @@ with tab_us:
                     for t in del_list_us:
                         if t in st.session_state['watchlists']['US']:
                             st.session_state['watchlists']['US'].remove(t)
-                    save_json(DB_WATCHLISTS, st.session_state['watchlists'])
+                    save_json_sync(DB_WATCHLISTS, st.session_state['watchlists'])
                     st.session_state.us_edit_key += 1
                     st.rerun()
             with col_n_us:
@@ -841,14 +907,20 @@ with tab_alerts:
     st.header("🧠 情境式智慧趨勢監控與持股健檢")
     st.markdown("設定專屬監控標的，系統會在技術面達標、或到達特定日期/價格時跳出具體行動建議並同步推播至 Discord。")
     
-    # Discord 設定與測試區塊
-    with st.expander("📲 Discord 自動推播連線設定與測試", expanded=True):
+    # Discord 與 GitHub 同步狀態區塊
+    with st.expander("📲 Discord 推播與 GitHub 排程同步狀態", expanded=False):
         cur_webhook = get_discord_webhook()
+        gh_token, gh_repo = get_github_config()
         if cur_webhook:
             st.success("✅ 已讀取 Discord Webhook 連線設定")
         else:
-            st.warning("⚠️ 尚未讀取到 Secrets 設定，請確認已於 Streamlit Cloud Settings -> Secrets 儲存 `DISCORD_WEBHOOK_URL`，或於下方暫時貼上測試。")
+            st.warning("⚠️ 尚未讀取到 `DISCORD_WEBHOOK_URL`，請於 Streamlit Secrets 設定。")
         
+        if gh_token:
+            st.success(f"☁️ 已啟用 GitHub 自動同步（`{gh_repo}`），網頁修改將自動套用至每日盤後排程")
+        else:
+            st.info("💡 尚未設定 `GITHUB_TOKEN`，目前修改僅存在網頁暫存區，不會同步到每日盤後排程。")
+
         in_webhook = st.text_input("Discord Webhook 網址 (若已設 Secrets 可留空)", type="password", key="dc_url_in")
         if in_webhook:
             st.session_state["custom_discord_url"] = in_webhook
@@ -858,30 +930,9 @@ with tab_alerts:
             if ok: st.success("✅ 測試訊息已發送！請查看您的 Discord 頻道通知。")
             else: st.error(f"❌ 發送失敗：{msg}")
 
-    st.markdown("""
-    <div style="background-color: #262730; padding: 15px; border-radius: 8px; border: 1px solid #4f4f4f; margin-bottom: 20px;">
-        <span style="font-size: 1.1em; font-weight: bold; color: #ffc107;">🧠 智慧趨勢情境條件說明與標準</span><br>
-        <span style="color: #d1d1d1;">本系統針對持股與空手狀態，自動偵測以下情境並給予具體行動建議：</span><br><br>
-        <span style="font-weight: bold; color: #ff4b4b;">🔴 持股風險升高 (趨勢轉弱)</span><br>
-        <span style="color: #d1d1d1;">
-        - <b>發生什麼事</b>：股價跌破設定的防守線或 20 日均線。<br>
-        - <b>為什麼提醒</b>：股價跌破重要趨勢支撐，原本的多頭格局受到破壞。<br>
-        - <b>建議下一步</b>：請檢查目前持股風險、原定停損條件及部位大小。這是風險提醒，不代表必須立即殺出，請先評估自身承受度。<br>
-        - <b>失效條件</b>：若三日內能帶量強勢站回 20 日均線之上，則危機解除。
-        </span><br><br>
-        <span style="font-weight: bold; color: #00cc96;">🟢 趨勢轉強 (加碼評估)</span><br>
-        <span style="color: #d1d1d1;">
-        - <b>發生什麼事</b>：股價帶量突破前日高點，且維持在均線之上。<br>
-        - <b>為什麼提醒</b>：出現明顯的右側轉強訊號，趨勢向上確立。<br>
-        - <b>建議下一步</b>：可評估是否符合你的加碼計畫；請同時確認距離停損位置的幅度與新增部位的風險。<br>
-        - <b>失效條件</b>：若接下來兩日無量下跌跌破今日低點，則轉強訊號失效。
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
     st.subheader("⚙️ 新增 / 編輯監控規則")
     with st.form("alert_config_form"):
-        ticker_input = st.text_input("股票代號 (台股請加 .TW)", placeholder="例如: 2603.TW")
+        ticker_input = st.text_input("股票代號 (台股上市加 .TW、上櫃加 .TWO，美股直接輸入)", placeholder="例如: 2603.TW 或 NVDA")
         status_input = st.radio("交易目的", ["準備進場 (尚未持有)", "停利/風險管理 (已持有)"])
         cost_input = st.number_input("持有平均成本 (空手請填 0)", min_value=0.0, step=1.0)
         note_input = st.text_area("個人紀律筆記", placeholder="例如：等下週四法說會開完再決定。")
@@ -890,23 +941,49 @@ with tab_alerts:
         date_input = st.date_input("選擇提醒日", value=datetime.date.today()) if enable_date else None
         target_price_input = st.number_input("到達特定價格提醒 (0代表不設定)", min_value=0.0, step=1.0)
         
-        if st.form_submit_button("💾 儲存監控規則與筆記", use_container_width=True):
+        if st.form_submit_button("💾 儲存監控規則並同步排程", use_container_width=True):
             if ticker_input:
-                ticker = ticker_input.upper()
+                ticker = ticker_input.strip().upper()
                 st.session_state['user_config'][ticker] = {
                     "status": "holding" if "已持有" in status_input else "observing",
                     "cost": cost_input, "note": note_input, "target_price": target_price_input,
                     "reminder_date": date_input.strftime("%Y-%m-%d") if enable_date else ""
                 }
-                save_json(DB_ALERTS, st.session_state['user_config'])
-                st.success(f"已更新 {ticker} 的監控規則！")
-                
+                ok_sync, sync_msg = save_json_sync(DB_ALERTS, st.session_state['user_config'])
+                if ok_sync:
+                    st.success(f"✅ 已更新 {ticker} 的監控規則！（{sync_msg}）")
+                else:
+                    st.warning(f"已更新 {ticker}，但：{sync_msg}")
+
+    # 目前監控清單管理（含一鍵刪除）
+    st.markdown("---")
+    st.subheader("📋 目前監控清單管理")
+    config = st.session_state['user_config']
+    if not config:
+        st.info("目前沒有監控中的標的。請從上方表單新增。")
+    else:
+        for tk, s in list(config.items()):
+            code = tk.replace(".TW", "").replace(".TWO", "")
+            tk_label = f"{tk} {TW_STOCK_NAMES[code]}" if (tk.endswith(".TW") or tk.endswith(".TWO")) and code in TW_STOCK_NAMES else tk
+            status_str = "已持有" if s.get("status") == "holding" else "觀察中"
+            cost_str = f"成本 {s.get('cost', 0)}" if s.get("cost", 0) > 0 else "空手"
+            target_str = f"目標價 {s.get('target_price', 0)}" if s.get("target_price", 0) > 0 else "無目標價"
+            date_str = f"提醒日 {s.get('reminder_date')}" if s.get("reminder_date") else ""
+            note_str = f"｜📝 {s.get('note')}" if s.get("note") else ""
+
+            c_info, c_del = st.columns([5, 1])
+            with c_info:
+                st.markdown(f"**{tk_label}** 〔{status_str}〕｜{cost_str}｜{target_str} {date_str}{note_str}")
+            with c_del:
+                if st.button("🗑️ 刪除", key=f"del_alert_{tk}", use_container_width=True):
+                    del st.session_state['user_config'][tk]
+                    ok_sync, sync_msg = save_json_sync(DB_ALERTS, st.session_state['user_config'])
+                    st.toast(f"已刪除 {tk}（{sync_msg}）")
+                    st.rerun()
+
     st.markdown("---")
     st.subheader("📩 趨勢通知與多維健檢中心")
-    config = st.session_state['user_config']
-    if not config: 
-        st.info("目前沒有監控中的標的。請從上方新增設定。")
-    else:
+    if config:
         auto_push_dc = st.checkbox("📲 掃描觸發警報時自動推播至 Discord", value=True)
         if st.button("🔄 立即執行全盤掃描與健檢", type="primary", use_container_width=True):
             with st.spinner("正在進行多面向情境診斷..."):
@@ -929,8 +1006,8 @@ with tab_alerts:
                         note_text = alert_data.get('個人筆記', '')
                         note_html = f"<i style='color: #bbb;'>{note_text}</i>" if note_text else "<i style='color: #666;'>無</i>"
 
-                        display_ticker_alert = ticker.replace(".TW", "")
-                        if ".TW" in ticker and display_ticker_alert in TW_STOCK_NAMES:
+                        display_ticker_alert = ticker.replace(".TW", "").replace(".TWO", "")
+                        if (".TW" in ticker or ".TWO" in ticker) and display_ticker_alert in TW_STOCK_NAMES:
                             display_ticker_alert = f"{display_ticker_alert} {TW_STOCK_NAMES[display_ticker_alert]}"
 
                         dc_block = (
@@ -981,11 +1058,11 @@ with tab_tearsheet:
 
     if ts_submit and ts_ticker:
         with st.spinner("彙整全球資料庫中..."):
-            stock = yf.Ticker(ts_ticker.upper())
+            stock = yf.Ticker(ts_ticker.strip().upper())
             info = stock.info
             
-            base_ticker = ts_ticker.upper().replace(".TW", "")
-            if ".TW" in ts_ticker.upper() and base_ticker in TW_STOCK_NAMES:
+            base_ticker = ts_ticker.strip().upper().replace(".TW", "").replace(".TWO", "")
+            if (".TW" in ts_ticker.upper() or ".TWO" in ts_ticker.upper()) and base_ticker in TW_STOCK_NAMES:
                 name = TW_STOCK_NAMES[base_ticker]
             else:
                 name = info.get("longName", info.get("shortName", ts_ticker))
@@ -1019,7 +1096,7 @@ with tab_tearsheet:
             st.write(f"- **遠期本益比 (Forward PE)**：{round(fwd_pe, 2) if isinstance(fwd_pe, float) else fwd_pe}")
             
             st.markdown("### 📰 近期市場關鍵字偵測")
-            news_html = fetch_news_text(ts_ticker, ".TW" in ts_ticker)
+            news_html = fetch_news_text(ts_ticker, ".TW" in ts_ticker.upper() or ".TWO" in ts_ticker.upper())
             if any(k in news_html for k in ["創新高", "大增", "看好", "受惠"]): 
                 st.success("雷達偵測到近期包含「創新高、大增、看好」等正面關鍵字。")
             elif any(k in news_html for k in ["衰退", "下修", "轉虧"]): 
