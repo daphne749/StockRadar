@@ -1,0 +1,16 @@
+{
+    "2330.TW": {
+        "status": "observing",
+        "cost": 0.0,
+        "note": "觀察回踩月線支撐",
+        "target_price": 0.0,
+        "reminder_date": ""
+    },
+    "NVDA": {
+        "status": "holding",
+        "cost": 120.0,
+        "note": "波段續抱，跌破20MA減碼",
+        "target_price": 160.0,
+        "reminder_date": ""
+    }
+}
