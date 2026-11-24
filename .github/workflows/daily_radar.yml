@@ -1,0 +1,29 @@
+name: 每日盤後自動掃描與推播
+
+on:
+  schedule:
+    # 台灣時間 週一～週五 16:30（UTC 08:30）掃描台股
+    - cron: '30 8 * * 1-5'
+    # 台灣時間 週二～週六 06:30（UTC 22:30）掃描美股
+    - cron: '30 22 * * 1-5'
+  workflow_dispatch: # 允許隨時手動點擊測試
+
+jobs:
+  scan_and_notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下載專案程式碼
+        uses: actions/checkout@v4
+
+      - name: 設定 Python 環境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安裝必要套件
+        run: pip install yfinance pandas requests
+
+      - name: 執行盤後掃描並推播至 Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python daily_scan.py
