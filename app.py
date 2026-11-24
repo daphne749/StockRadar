@@ -6,6 +6,8 @@ import json
 import os
 import requests
 import urllib.parse
+import socket
+import urllib3.util.connection as urllib3_cn
 
 # === 1. 網頁全域設定與手機端按鈕優化 ===
 st.set_page_config(page_title="專業波段選股系統", page_icon="📈", layout="wide")
@@ -19,7 +21,7 @@ st.markdown("""
 st.title("📈 雙引擎波段選股雷達")
 st.markdown("💰 **資金風控**：每單 30,000 TWD | 🎯 **核心策略**：20MA 回調買入 + 30% 停利 + 智慧情境監控")
 
-# === Telegram 推播核心模組 (支援 Google Apps Script 中繼通道) ===
+# === Telegram 推播核心模組 (Google Apps Script 中繼通道 + 強制 IPv4) ===
 def get_tg_credentials():
     token = st.session_state.get("custom_tg_token", "")
     chat_id = st.session_state.get("custom_tg_chat_id", "")
@@ -47,6 +49,8 @@ def send_telegram_msg(text):
         return False, "尚未設定 TG_BOT_TOKEN 或 TG_CHAT_ID"
     
     proxy_url = get_tg_proxy_url()
+    orig_family = urllib3_cn.allowed_gai_family
+    urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
     
     try:
         if proxy_url:
@@ -62,12 +66,20 @@ def send_telegram_msg(text):
                 json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
                 timeout=25
             )
-        data = res.json()
+        try:
+            data = res.json()
+        except ValueError:
+            return False, f"中繼站回傳格式異常 (狀態碼 {res.status_code})，請確認 Google Apps Script 部署權限已設為「所有人」且網址為 /exec 結尾"
+        
         if res.status_code == 200 and data.get("ok"):
             return True, "推播成功"
         return False, f"Telegram 拒絕發送：{data.get('description', '未知錯誤')}"
+    except requests.exceptions.Timeout:
+        return False, "連線逾時（25 秒），請稍後再試一次"
     except Exception as e:
         return False, f"連線異常：{e}"
+    finally:
+        urllib3_cn.allowed_gai_family = orig_family
 
 # === 內建台股中文名稱全自動動態字典 ===
 @st.cache_data(ttl=86400) 
