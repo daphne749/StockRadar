@@ -5,5 +5,12 @@
         "note": "量縮止跌、出現下影線或紅k轉強分批切入",
         "target_price": 38.5,
         "reminder_date": ""
+    },
+    "SPCX": {
+        "status": "observing",
+        "cost": 0.0,
+        "note": "IPO,到期",
+        "target_price": 38.5,
+        "reminder_date": "2026-11-25"
     }
 }
