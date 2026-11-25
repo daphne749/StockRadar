@@ -780,7 +780,7 @@ with tab_tw:
     with col3: min_trust = st.slider("投信近5日買超 > (張)", 0, 2000, 0, 100)
     with col4:
         st.write("")
-        stealth_only = st.checkbox("只抓隱藏多頭", value=True)
+        stealth_only = st.checkbox("只抓隱藏多頭", value=True, key="stealth_tw")
         
     if st.button("🚀 執行台股動態掃描", type="primary", use_container_width=True):
         with st.spinner("掃描市場與計算中..."):
@@ -819,7 +819,7 @@ with tab_us:
         <span style="color: #d1d1d1;">這套雷達旨在幫您避開「追高被套」的風險，專門尋找<b>大趨勢保護下，剛好拉回支撐</b>的潛力美股。</span><br><br>
         <span style="font-weight: bold; color: #ffffff;">🔍 動態掃描的篩選條件包含：</span><br>
         <span style="color: #d1d1d1;">
-        1. <b>技術面 (隱藏多頭)</b>：股票必須在季線 (60MA) 之上，近一個月只溫和上漲 (0~15%)，且今天剛好回踩或緊貼月線 (20MA)，風險極低。<br>
+        1. <b>技術面 (隱藏多頭)</b>：勾選「只抓隱藏多頭」時，專門鎖定在季線 (60MA) 之上、近一月溫和上漲 (0~15%) 且緊貼月線 (20MA) 的標的；<b>取消勾選則會放寬限制並一併掃描熱門權值股</b>。<br>
         2. <b>基本面 (估值評估)</b>：自動計算遠期本益比 (Forward PE)，幫您判斷現在買進是便宜、合理還是偏貴。<br>
         3. <b>消息面 (未來潛力)</b>：掃描最新新聞，偵測是否具備「成長、創新高、受惠」等題材，即使技術面破線也會給予關注提醒。
         </span>
@@ -883,26 +883,33 @@ with tab_us:
         st.info("美股觀察清單目前為空，請從上方輸入代號新增。")
 
     st.markdown("---")
-    st.subheader("🔍 市場動態掃描 (中小型・非熱門巨頭・隱藏多頭)")
+    st.subheader("🔍 市場動態掃描 (隱藏多頭 / 熱門權值股)")
     
     col_u1, col_u2 = st.columns([1, 1])
-    with col_u1: max_price_us = st.number_input("最高股價 (美元)", value=150, step=10, key="max_us")
-    with col_u2: 
+    with col_u1:
+        max_price_us = st.number_input("最高股價 (美元)", value=1000, step=50, key="max_us")
+    with col_u2:
         st.write("")
-        scan_us_btn = st.button("🚀 執行美股動態掃描", type="primary", use_container_width=True)
+        stealth_only_us = st.checkbox("只抓隱藏多頭", value=True, key="stealth_us", help="取消勾選時，將放寬技術面條件並一併抓取 NVDA、AAPL、MSFT 等熱門股")
+
+    scan_us_btn = st.button("🚀 執行美股動態掃描", type="primary", use_container_width=True)
 
     if scan_us_btn:
-        with st.spinner("掃描板塊與計算中..."):
-            US_BROAD_POOL = ["FOUR", "VRT", "ONON", "CELH", "ELF", "UBER", "HOOD", "RDDT", "WING", "DKNG", "PLTR", "DDOG", "CRWD", "ARM"]
+        with st.spinner("掃描美股板塊與計算中..."):
+            US_NICHE_POOL = ["FOUR", "VRT", "ONON", "CELH", "ELF", "UBER", "HOOD", "RDDT", "WING", "DKNG", "PLTR", "DDOG", "CRWD", "ARM"]
+            US_HOT_POOL = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "AVGO", "AMD", "NFLX", "MU", "ORCL", "CRM", "TSM"]
+            
+            scan_pool_us = US_NICHE_POOL if stealth_only_us else list(dict.fromkeys(US_NICHE_POOL + US_HOT_POOL))
             scan_res_us, eps_res_us = [], []
-            for t in US_BROAD_POOL:
-                res = analyze_stock_master(t, is_tw=False, max_price=max_price_us, filter_stealth=True)
+            for t in scan_pool_us:
+                res = analyze_stock_master(t, is_tw=False, max_price=max_price_us, filter_stealth=stealth_only_us)
                 if res:
                     scan_res_us.append(res["overview"])
                     eps_res_us.append(res["eps_details"])
             
             if scan_res_us:
-                st.success("✅ 發現潛力美股！")
+                mode_label = "隱藏多頭" if stealth_only_us else "全池含熱門股"
+                st.success(f"✅ 掃描完成（{mode_label}），共篩選出 {len(scan_res_us)} 檔標的！")
                 st.dataframe(
                     pd.DataFrame(scan_res_us).style.map(color_us, subset=['單日漲跌(%)', '近一月漲跌(%)']), 
                     use_container_width=True, hide_index=True
@@ -910,13 +917,13 @@ with tab_us:
                 with st.expander("📊 點擊展開 EPS 獲利分析表"):
                     st.table(pd.DataFrame(eps_res_us))
                 
-                dc_lines_us = [f"**🇺🇸 美股波段雷達掃描結果 ({datetime.date.today()})**\n"]
+                dc_lines_us = [f"**🇺🇸 美股波段雷達掃描結果 ({datetime.date.today()}｜{mode_label})**\n"]
                 for r in scan_res_us:
                     dc_lines_us.append(f"• **{r['標的']}**｜現價 ${r['收盤價']:.2f}｜{r['綜合決策']}｜停損 ${r['防守停損']:.2f} / 停利 ${r['停利目標']:.2f}")
                 ok, s_msg = send_discord_msg("\n".join(dc_lines_us))
                 if ok: st.toast("📲 已同步推播美股掃描結果至 Discord！")
             else:
-                st.info("💡 今日市場無符合條件的標的。")
+                st.info("💡 今日市場無符合條件的標的（可嘗試取消勾選「只抓隱藏多頭」以檢視熱門股）。")
 
 # ----------------- 分頁 3：智慧趨勢提醒與健檢 -----------------
 with tab_alerts:
