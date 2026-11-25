@@ -152,7 +152,7 @@ def get_all_tw_stock_names():
         if res.get("msg") == "success" and "data" in res:
             df = pd.DataFrame(res["data"])
             return dict(zip(df['stock_id'].astype(str), df['stock_name']))
-    except:
+    except Exception:
         pass
     return {
         "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電", "2382": "廣達",
@@ -202,7 +202,7 @@ def fetch_news_text(ticker, is_tw):
     try:
         res = requests.get(url, timeout=3)
         return res.text
-    except:
+    except Exception:
         return ""
 
 def check_future_potential(news_text, eps_growth):
@@ -229,7 +229,7 @@ def get_finmind_chips(ticker, days=5):
             trust = int(df_chips[df_chips["name"] == "投信"]["buy_sell"].sum() // 1000)
             status = "🔥 大人連買" if (foreign + trust) > 500 else "🧊 遭逢調節" if (foreign + trust) < -500 else "⚪ 籌碼中性"
             return {"外資近5日(張)": foreign, "投信近5日(張)": trust, "狀態": status}
-    except:
+    except Exception:
         pass
     return {"外資近5日(張)": 0, "投信近5日(張)": 0, "狀態": "無資料/頻率限制"}
 
@@ -256,7 +256,7 @@ def get_tw_monthly_revenue(stock_id):
                 "月營收(億)": round(rev / 1e8, 2),
                 "營收年增率(%)": round(yoy, 2) if yoy is not None else None
             }
-    except:
+    except Exception:
         pass
     return None
 
@@ -346,7 +346,7 @@ def screen_fundamental_stocks(is_tw=True):
                     "date": today_str,
                     "source": source_str
                 })
-        except:
+        except Exception:
             continue
     return results
 
@@ -368,26 +368,33 @@ def call_gemini_research_assistant(api_key, stock_data_list, market_name):
     except Exception as e:
         return f"⚠️ 呼叫 AI 時發生錯誤：{e}"
 
-# === 4. 整合分析引擎 ===
+# === 4. 整合分析引擎 (已加入空值防呆保護) ===
 @st.cache_data(ttl=1800)
 def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min_trust=0, filter_stealth=False):
     stock = yf.Ticker(ticker)
     try:
         df = stock.history(period="6mo")
-        if len(df) < 60: return None
-    except: return None
+        if df is None or df.empty:
+            return None
+        df = df.dropna(subset=["Close"])
+        if len(df) < 60:
+            return None
+    except Exception:
+        return None
         
-    latest_price = df.iloc[-1]["Close"]
-    if latest_price > max_price: return None
+    latest_price = float(df.iloc[-1]["Close"])
+    if pd.isna(latest_price) or latest_price <= 0 or latest_price > max_price:
+        return None
         
     df = calculate_indicators(df)
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
-    pct_change = ((latest_price - prev["Close"]) / prev["Close"]) * 100
-    month_return = latest["Return_20d"]
-    ma20 = latest["MA20"]
-    ma60 = latest["MA60"]
+    prev_close = float(prev["Close"])
+    pct_change = ((latest_price - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+    month_return = float(latest["Return_20d"]) if not pd.isna(latest["Return_20d"]) else 0.0
+    ma20 = float(latest["MA20"]) if not pd.isna(latest["MA20"]) else latest_price
+    ma60 = float(latest["MA60"]) if not pd.isna(latest["MA60"]) else latest_price
 
     if filter_stealth:
         is_long_uptrend = latest_price > ma60
@@ -406,7 +413,7 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
         trailing_eps = info.get("trailingEps", 0)
         forward_eps = info.get("forwardEps", 0)
         forward_pe = info.get("forwardPE", 0)
-    except:
+    except Exception:
         trailing_eps, forward_eps, forward_pe = 0, 0, 0
 
     eps_growth = ((forward_eps - trailing_eps) / trailing_eps) * 100 if (trailing_eps and forward_eps and trailing_eps > 0) else 0
@@ -442,9 +449,9 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
     return {
         "overview": {
             "標的": display_ticker,
-            "收盤價": float(latest_price), 
-            "單日漲跌(%)": float(pct_change),
-            "近一月漲跌(%)": float(month_return) if not pd.isna(month_return) else 0.0,
+            "收盤價": latest_price, 
+            "單日漲跌(%)": pct_change,
+            "近一月漲跌(%)": month_return,
             "綜合決策": decision,
             "估值評估": valuation,
             "籌碼狀態": chips.get("狀態"),
@@ -462,27 +469,36 @@ def analyze_stock_master(ticker, is_tw=True, max_price=99999, min_foreign=0, min
         }
     }
 
-# === 5. 智慧情境警報引擎 ===
+# === 5. 智慧情境警報引擎 (已加入空值防呆保護) ===
 def generate_smart_alert(ticker, user_settings):
     stock = yf.Ticker(ticker)
     try:
         df = stock.history(period="6mo")
-        if len(df) < 60: return None
-    except: return None
+        if df is None or df.empty:
+            return None
+        df = df.dropna(subset=["Close"])
+        if len(df) < 60:
+            return None
+    except Exception:
+        return None
     
     df = calculate_indicators(df)
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     
-    price = latest["Close"]
-    ma20 = latest["MA20"]
-    low_10 = latest["Low_10"]
-    vol_surge = latest["Volume"] > (latest["Vol_MA5"] * 1.3)
+    price = float(latest["Close"])
+    if pd.isna(price) or price <= 0:
+        return None
+    ma20 = float(latest["MA20"]) if not pd.isna(latest["MA20"]) else price
+    low_10 = float(latest["Low_10"]) if not pd.isna(latest["Low_10"]) else price
+    vol_ma5 = float(latest["Vol_MA5"]) if not pd.isna(latest["Vol_MA5"]) else 0.0
+    vol_surge = (float(latest["Volume"]) > (vol_ma5 * 1.3)) if vol_ma5 > 0 else False
+    rsi_val = float(latest["RSI"]) if not pd.isna(latest["RSI"]) else 0.0
     
     status = user_settings.get("status", "observing") 
-    cost = user_settings.get("cost", 0.0)
+    cost = float(user_settings.get("cost", 0.0))
     note = user_settings.get("note", "")
-    target_price = user_settings.get("target_price", 0.0)
+    target_price = float(user_settings.get("target_price", 0.0))
     reminder_date_str = user_settings.get("reminder_date", "")
     
     alert = None
@@ -517,7 +533,7 @@ def generate_smart_alert(ticker, user_settings):
                 "建議下一步": "可觀察是否能帶量突破短期下降趨勢線。建議先觀察，不急著摸底買進。",
                 "失效條件": "若收盤跌破近期低點，則止跌失敗，重啟跌勢。"
             }
-        elif price > ma20 and vol_surge and latest["RSI"] > 50:
+        elif price > ma20 and vol_surge and rsi_val > 50:
             alert = {
                 "發生什麼事": f"股價帶量突破 20 日均線，且 RSI 站上 50 多空分界。",
                 "目前階段": "🎯 反彈確認 (可評估進場)",
