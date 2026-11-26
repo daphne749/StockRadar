@@ -178,6 +178,40 @@ if 'watchlists' not in st.session_state:
 if 'tw_edit_key' not in st.session_state: st.session_state.tw_edit_key = 0
 if 'us_edit_key' not in st.session_state: st.session_state.us_edit_key = 0
 
+# === 監控規則表單狀態初始化與編輯回呼 ===
+def reset_alert_form():
+    st.session_state["alert_editing_tk"] = ""
+    st.session_state["alert_ticker"] = ""
+    st.session_state["alert_status"] = "準備進場 (尚未持有)"
+    st.session_state["alert_cost"] = 0.0
+    st.session_state["alert_note"] = ""
+    st.session_state["alert_enable_date"] = False
+    st.session_state["alert_date"] = datetime.date.today()
+    st.session_state["alert_target_price"] = 0.0
+
+def load_alert_for_edit(tk):
+    s = st.session_state['user_config'].get(tk, {})
+    st.session_state["alert_editing_tk"] = tk
+    st.session_state["alert_ticker"] = tk
+    st.session_state["alert_status"] = "停利/風險管理 (已持有)" if s.get("status") == "holding" else "準備進場 (尚未持有)"
+    st.session_state["alert_cost"] = float(s.get("cost", 0.0))
+    st.session_state["alert_note"] = str(s.get("note", ""))
+    rem_date_str = str(s.get("reminder_date", "")).strip()
+    if rem_date_str:
+        try:
+            st.session_state["alert_enable_date"] = True
+            st.session_state["alert_date"] = datetime.datetime.strptime(rem_date_str, "%Y-%m-%d").date()
+        except Exception:
+            st.session_state["alert_enable_date"] = False
+            st.session_state["alert_date"] = datetime.date.today()
+    else:
+        st.session_state["alert_enable_date"] = False
+        st.session_state["alert_date"] = datetime.date.today()
+    st.session_state["alert_target_price"] = float(s.get("target_price", 0.0))
+
+if "alert_ticker" not in st.session_state:
+    reset_alert_form()
+
 # === 3. 核心指標與新聞探勘模組 ===
 def calculate_indicators(df):
     df["MA20"] = df["Close"].rolling(20).mean()
@@ -929,6 +963,10 @@ with tab_us:
 with tab_alerts:
     st.header("🧠 情境式智慧趨勢監控與持股健檢")
     st.markdown("設定專屬監控標的，系統會在技術面達標、或到達特定日期/價格時跳出具體行動建議並同步推播至 Discord。")
+
+    # 若剛完成儲存或刪除正在編輯的項目，於繪製欄位前重置表單
+    if st.session_state.pop("pending_alert_reset", False):
+        reset_alert_form()
     
     # Discord 與 GitHub 同步狀態區塊
     with st.expander("📲 Discord 推播與 GitHub 排程同步狀態", expanded=False):
@@ -953,32 +991,73 @@ with tab_alerts:
             if ok: st.success("✅ 測試訊息已發送！請查看您的 Discord 頻道通知。")
             else: st.error(f"❌ 發送失敗：{msg}")
 
+    # 顯示儲存成功或同步警告訊息
+    feedback = st.session_state.pop("alert_save_feedback", None)
+    if feedback:
+        ok_fb, msg_fb = feedback
+        if ok_fb:
+            st.success(f"✅ {msg_fb}")
+        else:
+            st.warning(msg_fb)
+
     st.subheader("⚙️ 新增 / 編輯監控規則")
-    with st.form("alert_config_form"):
-        ticker_input = st.text_input("股票代號 (台股上市加 .TW、上櫃加 .TWO，美股直接輸入)", placeholder="例如: 2603.TW 或 NVDA")
-        status_input = st.radio("交易目的", ["準備進場 (尚未持有)", "停利/風險管理 (已持有)"])
-        cost_input = st.number_input("持有平均成本 (空手請填 0)", min_value=0.0, step=1.0)
-        note_input = st.text_area("個人紀律筆記", placeholder="例如：等下週四法說會開完再決定。")
+    editing_tk = st.session_state.get("alert_editing_tk", "")
+    if editing_tk:
+        c_ed_msg, c_ed_cancel = st.columns([4, 1])
+        with c_ed_msg:
+            st.info(f"✏️ 正在編輯 **{editing_tk}** 的監控規則，修改完畢請點擊下方「儲存」按鈕。")
+        with c_ed_cancel:
+            st.button("✖️ 取消編輯", on_click=reset_alert_form, use_container_width=True)
+
+    # 改用一般容器（不使用 st.form），讓勾選日期後立刻展開日期選單，按一次即可儲存
+    with st.container(border=True):
+        ticker_input = st.text_input(
+            "股票代號 (台股上市加 .TW、上櫃加 .TWO，美股直接輸入)",
+            placeholder="例如: 2603.TW 或 NVDA",
+            key="alert_ticker"
+        )
+        status_input = st.radio(
+            "交易目的",
+            ["準備進場 (尚未持有)", "停利/風險管理 (已持有)"],
+            key="alert_status"
+        )
+        cost_input = st.number_input("持有平均成本 (空手請填 0)", min_value=0.0, step=1.0, key="alert_cost")
+        note_input = st.text_area("個人紀律筆記", placeholder="例如：等下週四法說會開完再決定。", key="alert_note")
         
-        enable_date = st.checkbox("設定日期提醒")
-        date_input = st.date_input("選擇提醒日", value=datetime.date.today()) if enable_date else None
-        target_price_input = st.number_input("到達特定價格提醒 (0代表不設定)", min_value=0.0, step=1.0)
+        enable_date = st.checkbox("設定日期提醒", key="alert_enable_date")
+        if enable_date:
+            date_input = st.date_input("選擇提醒日", key="alert_date")
+        else:
+            date_input = None
+
+        target_price_input = st.number_input("到達特定價格提醒 (0代表不設定)", min_value=0.0, step=1.0, key="alert_target_price")
         
-        if st.form_submit_button("💾 儲存監控規則並同步排程", use_container_width=True):
-            if ticker_input:
+        btn_label = f"💾 更新 {editing_tk} 監控規則並同步排程" if editing_tk else "💾 儲存監控規則並同步排程"
+        if st.button(btn_label, type="primary", use_container_width=True, key="btn_save_alert"):
+            if ticker_input and ticker_input.strip():
                 ticker = ticker_input.strip().upper()
+                # 若編輯時更改了股票代號，一併移除舊代號避免重複
+                if editing_tk and editing_tk != ticker and editing_tk in st.session_state['user_config']:
+                    del st.session_state['user_config'][editing_tk]
+
                 st.session_state['user_config'][ticker] = {
                     "status": "holding" if "已持有" in status_input else "observing",
-                    "cost": cost_input, "note": note_input, "target_price": target_price_input,
-                    "reminder_date": date_input.strftime("%Y-%m-%d") if enable_date else ""
+                    "cost": float(cost_input),
+                    "note": note_input,
+                    "target_price": float(target_price_input),
+                    "reminder_date": date_input.strftime("%Y-%m-%d") if (enable_date and date_input) else ""
                 }
                 ok_sync, sync_msg = save_json_sync(DB_ALERTS, st.session_state['user_config'])
                 if ok_sync:
-                    st.success(f"✅ 已更新 {ticker} 的監控規則！（{sync_msg}）")
+                    st.session_state["alert_save_feedback"] = (True, f"已儲存 {ticker} 的監控規則！（{sync_msg}）")
                 else:
-                    st.warning(f"已更新 {ticker}，但：{sync_msg}")
+                    st.session_state["alert_save_feedback"] = (False, f"已儲存 {ticker}，但：{sync_msg}")
+                st.session_state["pending_alert_reset"] = True
+                st.rerun()
+            else:
+                st.warning("⚠️ 請先輸入股票代號再儲存。")
 
-    # 目前監控清單管理（含一鍵刪除）
+    # 目前監控清單管理（支援一鍵編輯與刪除）
     st.markdown("---")
     st.subheader("📋 目前監控清單管理")
     config = st.session_state['user_config']
@@ -991,16 +1070,20 @@ with tab_alerts:
             status_str = "已持有" if s.get("status") == "holding" else "觀察中"
             cost_str = f"成本 {s.get('cost', 0)}" if s.get("cost", 0) > 0 else "空手"
             target_str = f"目標價 {s.get('target_price', 0)}" if s.get("target_price", 0) > 0 else "無目標價"
-            date_str = f"提醒日 {s.get('reminder_date')}" if s.get("reminder_date") else ""
+            date_str = f"｜📅 提醒日 {s.get('reminder_date')}" if s.get("reminder_date") else ""
             note_str = f"｜📝 {s.get('note')}" if s.get("note") else ""
 
-            c_info, c_del = st.columns([5, 1])
+            c_info, c_edit, c_del = st.columns([4, 1, 1])
             with c_info:
-                st.markdown(f"**{tk_label}** 〔{status_str}〕｜{cost_str}｜{target_str} {date_str}{note_str}")
+                st.markdown(f"**{tk_label}** 〔{status_str}〕｜{cost_str}｜{target_str}{date_str}{note_str}")
+            with c_edit:
+                st.button("✏️ 編輯", key=f"edit_alert_{tk}", on_click=load_alert_for_edit, args=(tk,), use_container_width=True)
             with c_del:
                 if st.button("🗑️ 刪除", key=f"del_alert_{tk}", use_container_width=True):
                     del st.session_state['user_config'][tk]
                     ok_sync, sync_msg = save_json_sync(DB_ALERTS, st.session_state['user_config'])
+                    if st.session_state.get("alert_editing_tk") == tk:
+                        st.session_state["pending_alert_reset"] = True
                     st.toast(f"已刪除 {tk}（{sync_msg}）")
                     st.rerun()
 
